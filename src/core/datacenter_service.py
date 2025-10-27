@@ -9,14 +9,17 @@
 @Software   : PyCharm
 @Description: 数据中心服务类 - 支持运行时启动/停止/状态查询
 """
+from __future__ import annotations
+
 import time
 import threading
 from pathlib import Path
 from typing import Optional, Dict, Any, Callable, List
 from enum import Enum
-from dataclasses import dataclass, asdict
+from dataclasses import dataclass, asdict, field
 from datetime import datetime
 
+from src.core.event import Event, EventType
 from src.core.event_bus import EventBus
 from src.core.storage import DataStorage
 from src.core.sqlite_storage import SQLiteStorage
@@ -27,6 +30,7 @@ from src.core.data_archiver import DataArchiver
 from src.core.datacenter_starter import DataCenterStarter
 from src.core.alarm_scheduler import AlarmScheduler, create_default_tasks
 from src.core.metrics_collector import MetricsCollector
+from src.core.trading_day_manager import TradingDayManager
 from src.gateway.market_gateway import MarketGateway
 from src.system_config import DatacenterConfig
 from src.utils.common import load_broker_config
@@ -57,9 +61,9 @@ class ServiceState:
     status: ServiceStatus
     start_time: Optional[str] = None
     uptime_seconds: int = 0
-    modules: Dict[str, ModuleStatus] = None
+    modules: Dict[str, ModuleStatus] = field(default_factory=dict)
     error_message: Optional[str] = None
-    last_update: str = None
+    last_update: Optional[str] = None
     
     def to_dict(self) -> dict:
         """转换为字典"""
@@ -87,7 +91,6 @@ class DataCenterService:
         # 服务状态
         self._state = ServiceState(
             status=ServiceStatus.STOPPED,
-            modules={},
             last_update=datetime.now().isoformat()
         )
         self._state_lock = threading.RLock()
@@ -95,6 +98,7 @@ class DataCenterService:
         # 核心组件
         self.starter: Optional[DataCenterStarter] = None
         self.event_bus: Optional[EventBus] = None
+        self.trading_day_manager: Optional[TradingDayManager] = None
         self.market_gateway: Optional[MarketGateway] = None
         self.hybrid_storage: Optional[HybridStorage] = None
         self.contract_manager: Optional[ContractManager] = None
@@ -222,11 +226,24 @@ class DataCenterService:
             )
             self._update_module_status("EventBus", "registered")
             
+            # 2.5 创建交易日管理器
+            self._add_log("INFO", "初始化交易日管理器...")
+            self.trading_day_manager = TradingDayManager(event_bus=self.event_bus)
+            self.starter.register_module(
+                name="TradingDayManager",
+                instance=self.trading_day_manager,
+                dependencies=["EventBus"]
+            )
+            self._update_module_status("TradingDayManager", "registered")
+            
             # 3. 创建存储层
             self._add_log("INFO", "初始化存储层...")
             
-            # Parquet 存储
-            parquet_storage = DataStorage(base_path="data")
+            # Parquet 存储（使用trading_day_manager）
+            parquet_storage = DataStorage(
+                base_path="data",
+                trading_day_manager=self.trading_day_manager
+            )
             self.starter.register_module(
                 name="ParquetStorage",
                 instance=parquet_storage,
@@ -234,10 +251,11 @@ class DataCenterService:
             )
             self._update_module_status("ParquetStorage", "registered")
             
-            # SQLite 存储
+            # SQLite 存储（按交易日+合约分库）
             sqlite_storage = SQLiteStorage(
                 db_path="data/db",
-                retention_days=7
+                retention_days=7,
+                trading_day_manager=self.trading_day_manager
             )
             self.starter.register_module(
                 name="SQLiteStorage",
@@ -246,11 +264,15 @@ class DataCenterService:
             )
             self._update_module_status("SQLiteStorage", "registered")
             
-            # 混合存储
+            # 混合存储（订阅 TICK 事件自动保存数据）
             self.hybrid_storage = HybridStorage(
+                event_bus=self.event_bus,  # 传入事件总线，自动订阅 TICK 事件
                 sqlite_db_path="data/db",
-                parquet_base_path="data",
-                retention_days=7
+                parquet_tick_path="data/ticks",  # Tick数据存储路径
+                parquet_kline_path="data/klines",  # K线数据存储路径
+                retention_days=7,
+                batch_size=100,  # 每100条 tick 批量写入一次
+                trading_day_manager=self.trading_day_manager  # 传入交易日管理器
             )
             self.starter.register_module(
                 name="HybridStorage",
@@ -277,7 +299,7 @@ class DataCenterService:
             self.market_gateway = MarketGateway(event_bus=self.event_bus)
             
             def start_market_gateway(gateway):
-                """启动行情网关"""
+                """启动行情网关（使用事件机制判断登录状态）"""
                 try:
                     broker_config = load_broker_config()
                     if not broker_config:
@@ -287,23 +309,51 @@ class DataCenterService:
                     broker_name = broker_config.get("broker_name")
                     config = broker_config.get("config")
                     
-                    self._add_log("INFO", f"连接行情网关: {broker_name}...")
-                    gateway.connect(config)
+                    # 创建登录完成事件（用于等待登录结果）
+                    login_event = threading.Event()
+                    login_success = [False]  # 使用列表避免闭包变量赋值问题
                     
-                    # 等待登录完成
-                    max_wait = 10
-                    waited = 0
-                    while waited < max_wait:
-                        if gateway.md_api and gateway.md_api.login_status:
+                    def on_login(event: Event):
+                        """登录事件回调 - 监听 MD_GATEWAY_LOGIN 事件"""
+                        payload = event.payload or {}
+                        if payload.get("code") == 0:
+                            # code=0 表示登录成功
                             self._add_log("INFO", f"✓ 行情网关 {broker_name} 登录成功")
-                            # 登录成功会自动发送 MD_GATEWAY_LOGIN 事件
-                            # ContractManager 收到事件后会自动订阅全部合约
-                            time.sleep(0.5)  # 短暂等待，确保登录事件已发送
-                            break
-                        time.sleep(0.1)
-                        waited += 0.1
-                    else:
-                        self._add_log("WARNING", f"行情网关连接超时（{max_wait}秒）")
+                            login_success[0] = True
+                        else:
+                            # code!=0 表示登录失败
+                            error_msg = payload.get("message", "未知错误")
+                            self._add_log("ERROR", f"✗ 行情网关 {broker_name} 登录失败: {error_msg}")
+                        
+                        # 无论成功或失败，都设置事件，结束等待
+                        login_event.set()
+                    
+                    # 订阅登录事件（在连接前订阅，确保不会错过事件）
+                    self.event_bus.subscribe(EventType.MD_GATEWAY_LOGIN, on_login)
+                    
+                    try:
+                        self._add_log("INFO", f"连接行情网关: {broker_name}...")
+                        gateway.connect(config)
+                        
+                        # 等待登录完成（使用事件机制）
+                        max_wait = 10
+                        if login_event.wait(timeout=max_wait):
+                            # 事件已触发，检查登录是否成功
+                            if login_success[0]:
+                                # 登录成功！
+                                # ContractManager 也会收到 MD_GATEWAY_LOGIN 事件并自动订阅合约
+                                time.sleep(0.5)  # 短暂等待，确保其他订阅者也处理了事件
+                            else:
+                                # 登录失败
+                                raise RuntimeError("行情网关登录失败")
+                        else:
+                            # 超时：没有收到登录事件
+                            self._add_log("WARNING", f"行情网关登录超时（{max_wait}秒）")
+                            self._add_log("WARNING", "可能原因：网络连接问题或CTP服务器无响应")
+                    
+                    finally:
+                        # 清理：取消订阅登录事件（避免内存泄漏）
+                        self.event_bus.unsubscribe(EventType.MD_GATEWAY_LOGIN, on_login)
                 
                 except Exception as e:
                     self._add_log("ERROR", f"行情网关启动失败: {e}")
@@ -468,14 +518,19 @@ class DataCenterService:
             self.stop()
             # 等待停止完成
             max_wait = 10
-            waited = 0
+            waited = 0.0
             while self._state.status == ServiceStatus.STOPPING and waited < max_wait:
                 time.sleep(0.5)
                 waited += 0.5
         
         return self.start()
     
-    def _update_module_status(self, module_name: str, status: str, error: str = None):
+    def _update_module_status(
+        self, 
+        module_name: str, 
+        status: str, 
+        error: Optional[str] = None
+        ):
         """更新模块状态"""
         with self._state_lock:
             if module_name not in self._state.modules:

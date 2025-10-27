@@ -174,7 +174,7 @@ class BarManager:
     
     def _bar_to_dataframe(self, bar: BarData, interval: str) -> pd.DataFrame:
         """
-        将BarData转换为DataFrame
+        将BarData转换为DataFrame（严格按照 BarData 字段定义）
         
         Args:
             bar: K线数据
@@ -184,17 +184,32 @@ class BarManager:
             DataFrame
         """
         return pd.DataFrame([{
-            "datetime": bar.timestamp,
+            # 基础信息
             "instrument_id": bar.instrument_id,
             "exchange_id": bar.exchange_id.value if bar.exchange_id else "",
-            "interval": interval,
+            "bar_type": bar.bar_type.value if bar.bar_type else interval,
+            "interval": interval,  # 保留兼容性
+            
+            # 时间信息
+            "datetime": bar.timestamp,  # K线开始时间（标准化后）
+            "timestamp": bar.timestamp,  # 同上，保留兼容性
+            "trading_day": bar.trading_day,  # 交易日
+            "update_time": bar.update_time,  # 最后更新时间
+            
+            # OHLC价格数据
             "open": bar.open_price,
+            "open_price": bar.open_price,  # 保留兼容性
             "high": bar.high_price,
+            "high_price": bar.high_price,  # 保留兼容性
             "low": bar.low_price,
+            "low_price": bar.low_price,  # 保留兼容性
             "close": bar.close_price,
-            "volume": bar.volume,
-            "open_interest": bar.open_interest,
-            "trading_day": bar.trading_day
+            "close_price": bar.close_price,  # 保留兼容性
+            
+            # 成交量和持仓
+            "volume": bar.volume,  # 当前K线的成交量
+            "open_interest": bar.open_interest,  # 持仓量
+            "last_volume": bar.last_volume,  # K线开始时的累计成交量
         }])
     
     def get_generator(self, instrument_id: str) -> Optional[MultiBarGenerator]:

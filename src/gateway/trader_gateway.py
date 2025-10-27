@@ -17,11 +17,28 @@ from typing import SupportsInt
 
 from src.constants import Const
 from src.core.base_gateway import BaseGateway
-from src.core.constants import ErrorReason, Currency, Exchange, Direction, Product, OrderStatus, OrderType, RspCode, \
+from src.core.constants import (
+    ErrorReason,
+    Currency,
+    Exchange,
+    Direction,
+    Product,
+    OrderStatus,
+    OrderType,
+    RspCode,
     RspMsg
+)
 from src.core.event import EventType, Event
 from src.core.event_bus import EventBus
-from src.core.object import OrderRequest, CancelRequest, ContractData, OrderData, PositionData, AccountData, TradeData
+from src.core.object import (
+    OrderRequest,
+    CancelRequest,
+    ContractData,
+    OrderData,
+    PositionData,
+    AccountData,
+    TradeData
+)
 from src.ctp.api import TdApi
 from src.ctp.api.ctp_constant import (
     THOST_TERT_QUICK,
@@ -35,17 +52,32 @@ from src.gateway.gateway_const import (
     ORDER_STATUS_CTP_TO_ENUM,
     symbol_contract_map,
     DIRECTION_CTP_TO_ENUM,
-    PRODUCT_CTP_TO_ENUM, CHINA_TZ, ORDER_TYPE_CTP_TO_ENUM, DIRECTION_ENUM_TO_CTP, OFFSET_ENUM_TO_CTP,
+    PRODUCT_CTP_TO_ENUM,
+    CHINA_TZ,
+    ORDER_TYPE_CTP_TO_ENUM,
+    DIRECTION_ENUM_TO_CTP,
+    OFFSET_ENUM_TO_CTP,
     ORDER_TYPE_ENUM_TO_CTP
 )
 from src.gateway.gateway_helper import (
     extract_error_msg,
     build_order_data,
-    build_contract_data, build_rtn_order_data, build_trade_data, update_position_detail
+    build_contract_data,
+    build_rtn_order_data,
+    build_trade_data,
+    update_position_detail
 )
 from src.utils.get_path import get_path_ins
 from src.utils.log import get_logger
-from src.utils.utility import prepare_address, write_json, load_ini, write_ini, del_num, delete_file, sleep
+from src.utils.utility import (
+    prepare_address,
+    write_json,
+    load_ini,
+    write_ini,
+    del_num,
+    delete_file,
+    sleep
+)
 
 
 class TraderGateway(BaseGateway):

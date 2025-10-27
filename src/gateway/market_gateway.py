@@ -61,13 +61,13 @@ class MarketGateway(BaseGateway):
         """
         try:
             # 步骤1：检查网关登录状态
-            if not self.md_api or not self.md_api.login_status:
+            if not self.md_api or not self.md_api.connect_login_status():
                 self.logger.warning("行情网关未登录，拒绝订阅请求")
                 self.logger.info("提示：请等待行情网关登录完成后再尝试订阅")
                 return
             
             # 步骤2：解析订阅请求
-            payload: dict = event.payload
+            payload: dict[str, Any] = event.payload or {}
             action: SubscribeAction = payload.get("data", {}).get("action", SubscribeAction.SUBSCRIBE)
             instruments: list[str] = payload.get('data', {}).get("instruments", [])
 
@@ -147,8 +147,6 @@ class MarketGateway(BaseGateway):
         except Exception as e:
             self.logger.error(f"处理订阅请求异常: {e}", exc_info=True)
             # 发送告警事件（如果有告警管理器）
-            from src.core.event import EventType
-
             self.event_bus.publish(Event.alarm(
                 payload = {
                     "message": f"行情订阅请求处理失败: {str(e)}",
@@ -239,7 +237,7 @@ class CtpMdApi(MdApi):
         self.user_product_info = ""  # 用户端产品信息 User product information
 
         self.connect_status: bool = False  # 连接状态
-        self.login_status: bool = False  # 登录状态
+        self._login_status: bool = False  # 登录状态
 
         self.current_date: str = datetime.now().strftime("%Y%m%d")  # 当前自然日
         self.tick_queue: Queue[TickData] = Queue()
@@ -302,7 +300,7 @@ class CtpMdApi(MdApi):
         return: None
         """
         self.connect_status = False
-        self.login_status = False
+        self._login_status = False
 
         reason_hex: str = hex(int(reason))  # 错误代码转换成16进制字符串
         reason_msg: ErrorReason = REASON_MAPPING.get(reason_hex, ErrorReason.REASON_UNKNOWN)
@@ -328,7 +326,7 @@ class CtpMdApi(MdApi):
         """
         rsp_error_msg = extract_error_msg(error, "行情服务器登录请求失败")
         if rsp_error_msg:
-            self.login_status = False
+            self._login_status = False
             self.logger.exception(rsp_error_msg)
 
             if self.gateway.event_bus:
@@ -341,7 +339,7 @@ class CtpMdApi(MdApi):
                 self.logger.info("已发布 MD_GATEWAY_LOGIN 事件")
             return
         else:
-            self.login_status = True
+            self._login_status = True
             self.logger.info("行情服务器登录请求成功")
             self.update_date()
             if self.gateway.event_bus:
@@ -421,18 +419,40 @@ class CtpMdApi(MdApi):
         data: In-depth market information
         return: None
         """
+        # 添加回调调用计数器（用于调试，确认回调是否被调用）
+        if not hasattr(self, '_callback_count'):
+            self._callback_count = 0
+            self.logger.info("🎯 onRtnDepthMarketData 回调已激活")
+        
+        self._callback_count += 1
+        
+        # 每50次回调打印一次（即使数据被过滤）
+        if self._callback_count % 50 == 0:
+            self.logger.info(f"📊 已接收 {self._callback_count} 次行情回调（包含被过滤的数据）")
+        
         # 此处要判断是否无效数据，例如非交易时间段的数据，避免无效数据推送给上层
         if data:
             # 过滤没有时间戳的异常行情数据
             # Filter out abnormal market data without timestamps
             if not data.get("UpdateTime"):
-                self.logger.debug("跳过没有时间戳的市场行情数据")
+                if not hasattr(self, '_no_timestamp_count'):
+                    self._no_timestamp_count = 0
+                self._no_timestamp_count += 1
+                if self._no_timestamp_count <= 3:  # 只打印前3次
+                    self.logger.warning(f"⚠️  跳过没有时间戳的市场行情数据（已跳过{self._no_timestamp_count}条）")
                 return
 
             instrument_id: str = data.get("InstrumentID", "UNKNOWN")
             # 过滤还没有收到合约数据前的行情推送(没有交易过的数据)
             contract: ContractData | None = symbol_contract_map.get(instrument_id)
             if not contract:
+                if not hasattr(self, '_no_contract_count'):
+                    self._no_contract_count: int = 0
+                    self._no_contract_set: set[str] = set()
+                self._no_contract_count += 1
+                if instrument_id not in self._no_contract_set:
+                    self._no_contract_set.add(instrument_id)
+                    self.logger.warning(f"⚠️  跳过未知合约的行情: {instrument_id}（累计跳过{self._no_contract_count}条，涉及{len(self._no_contract_set)}个合约）")
                 return
 
             # 对大商所的交易日字段取本地日期
@@ -446,8 +466,13 @@ class CtpMdApi(MdApi):
             # 构建系统内的tick行情数据结构
             tick: TickData = build_tick_data(data, contract, timestamp)
 
-            self.logger.debug(f"市场行情数据接收: {tick.instrument_id} @ {tick.update_time} "
-                  f"LastPrice={tick.last_price}")
+            # 使用INFO级别日志，确保能看到数据流（每10条打印一次）
+            if not hasattr(self, '_tick_count'):
+                self._tick_count = 0
+            self._tick_count += 1
+            
+            if self._tick_count % 10 == 0:
+                self.logger.info(f"✓ 已接收 {self._tick_count} 条Tick | 最新: {tick.instrument_id} @ {tick.update_time} P={tick.last_price}")
 
             self.gateway.event_bus.publish(
                 Event.tick(
@@ -741,7 +766,7 @@ class CtpMdApi(MdApi):
         Logout
         :return: None
         """
-        if not self.login_status:
+        if not self._login_status:
             self.logger.info("已登出，无需再次登出")
             return
 
@@ -791,7 +816,7 @@ class CtpMdApi(MdApi):
         Check connection and login status
         :return: True or False
         """
-        if not self.connect_status or not self.login_status:
+        if not self.connect_status or not self._login_status:
             self.logger.warning("没有连接或未登录行情服务器")
             return False
         else:

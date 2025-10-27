@@ -231,6 +231,7 @@ class EventType(object):
 
     # ===== 网关连接事件 =====
     MD_GATEWAY_CONNECT = "md_gateway.connect"  # 行情接口连接事件(成功/断开)
+    MD_GATEWAY_LOGIN_REQUEST = "md_gateway.login_request"   # 行情接口登录请求事件
     MD_GATEWAY_LOGIN = "md_gateway.login"  # 行情登录
     TD_GATEWAY_LOGIN = "td_gateway.login"  # 交易登录
     TD_QRY_INS = "td.qry.ins"  # 交易网关查询合约事件
@@ -277,3 +278,6 @@ class EventType(object):
 
     # ===== 配置更新事件 =====
     CONFIG_UPDATE = "config.update"  # 配置更新事件
+
+    # ===== 闹钟事件 =====
+    ALARM = "alarm"

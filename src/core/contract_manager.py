@@ -16,7 +16,9 @@ from typing import Optional
 
 from src.core.event_bus import EventBus
 from src.core.event import Event, EventType
-from src.core.constants import SubscribeAction
+from src.core.constants import SubscribeAction, Exchange
+from src.core.object import ContractData
+from src.gateway.gateway_const import symbol_contract_map
 from src.utils.log import get_logger
 
 
@@ -80,7 +82,7 @@ class ContractManager:
         self.event_bus.subscribe(EventType.TICK, self._on_tick)
     
     def _load_contracts(self) -> None:
-        """从配置文件加载全部合约列表"""
+        """从配置文件加载全部合约列表（同时填充全局symbol_contract_map）"""
         if not self.config_path.exists():
             self.logger.error(f"合约配置文件不存在: {self.config_path}")
             return
@@ -91,13 +93,26 @@ class ContractManager:
             
             # instrument_exchange.json 格式: {"instrument_id": "exchange_id", ...}
             for instrument_id, exchange_id in data.items():
-                contract = ContractInfo(
+                # 创建ContractInfo用于管理
+                contract_info = ContractInfo(
                     instrument_id=instrument_id,
                     exchange_id=exchange_id
                 )
-                self.contracts[contract.instrument_id] = contract
+                self.contracts[instrument_id] = contract_info
+                
+                # 同时填充全局symbol_contract_map（用于行情网关过滤）
+                try:
+                    exchange_enum = Exchange(exchange_id)
+                    contract_data = ContractData(
+                        instrument_id=instrument_id,
+                        exchange_id=exchange_enum,
+                        instrument_name=instrument_id  # 默认使用合约代码作为名称
+                    )
+                    symbol_contract_map[instrument_id] = contract_data
+                except ValueError:
+                    self.logger.warning(f"未知的交易所ID: {exchange_id}（合约: {instrument_id}），跳过填充到symbol_contract_map")
             
-            self.logger.info(f"成功加载 {len(self.contracts)} 个合约（将全部订阅）")
+            self.logger.info(f"成功加载 {len(self.contracts)} 个合约（将全部订阅），已填充到symbol_contract_map: {len(symbol_contract_map)} 个")
         
         except Exception as e:
             self.logger.error(f"加载合约配置失败: {e}", exc_info=True)
