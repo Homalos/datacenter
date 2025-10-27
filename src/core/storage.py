@@ -30,15 +30,15 @@ class DataStorage:
     - data/klines/{date}/{symbol}.parquet
     """
 
-    def __init__(self):
+    def __init__(self, base_path: str):
+        self.base_path = base_path
         self.conn = duckdb.connect(database=':memory:')
 
-    def _get_file_path(self, base_path: str, symbol: str, date: Optional[str] = None) -> Path:
+    def _get_file_path(self, symbol: str, date: Optional[str] = None) -> Path:
         """
         获取文件路径
         
         Args:
-            base_path: 基础路径（ticks或klines）
             symbol: 合约代码
             date: 日期字符串，格式YYYYMMDD，如果为None则使用今天
         
@@ -49,7 +49,7 @@ class DataStorage:
             date = datetime.now().strftime("%Y%m%d")
         
         # data/ticks/{date}/{symbol}.parquet
-        date_dir = Path(base_path) / date
+        date_dir = Path(self.base_path) / date
         date_dir.mkdir(parents=True, exist_ok=True)
         return date_dir / f"{symbol}.parquet"
 
@@ -62,7 +62,7 @@ class DataStorage:
             df: 数据DataFrame
             date: 日期（YYYYMMDD），默认今天
         """
-        file_path = self._get_file_path(settings.TICK_PATH, symbol, date)
+        file_path = self._get_file_path(symbol, date)
         
         # 检查文件是否存在且不为空
         if file_path.exists() and file_path.stat().st_size > 0:
@@ -88,7 +88,7 @@ class DataStorage:
             df: 数据DataFrame
             date: 日期（YYYYMMDD），默认今天
         """
-        file_path = self._get_file_path(settings.KLINE_PATH, symbol, date)
+        file_path = self._get_file_path(symbol, date)
         
         # 检查文件是否存在且不为空
         if file_path.exists() and file_path.stat().st_size > 0:

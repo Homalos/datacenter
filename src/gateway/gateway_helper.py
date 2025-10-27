@@ -11,7 +11,7 @@
 """
 from datetime import datetime
 
-from src.constants import INSTRUMENT_EXCHANGE_FILENAME
+from src.constants import Const
 from src.core.constants import Offset, OrderStatus, Product, Exchange, OrderType, Direction, OpenDate
 from src.core.object import TickData, ContractData, OrderData, TradeData, PositionDetailData
 from src.gateway.gateway_const import (
@@ -53,7 +53,7 @@ def get_exchange_name(instrument_id: str) -> str:
     :param instrument_id: 合约代码
     :return: 交易所名称
     """
-    return load_json(str(get_path_ins.get_config_dir() / INSTRUMENT_EXCHANGE_FILENAME)).get(instrument_id, "")
+    return load_json(str(get_path_ins.get_config_dir() / Const.INSTRUMENT_EXCHANGE_FILENAME)).get(instrument_id, "")
 
 def build_tick_data(data: dict, contract: ContractData, timestamp: datetime) -> TickData:
     """

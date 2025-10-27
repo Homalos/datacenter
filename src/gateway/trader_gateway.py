@@ -15,7 +15,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import SupportsInt
 
-from src.constants import INSTRUMENT_EXCHANGE_FILENAME, PRODUCT_INFO_FILENAME, Const
+from src.constants import Const
 from src.core.base_gateway import BaseGateway
 from src.core.constants import ErrorReason, Currency, Exchange, Direction, Product, OrderStatus, OrderType, RspCode, \
     RspMsg
@@ -330,9 +330,9 @@ class CtpTdApi(TdApi):
 
         self.current_date: str = datetime.now().strftime("%Y%m%d")  # 当前自然日
 
-        self.instrument_exchange_filepath: str = str(get_path_ins.get_config_dir() / INSTRUMENT_EXCHANGE_FILENAME)
+        self.instrument_exchange_filepath: str = str(get_path_ins.get_config_dir() / Const.INSTRUMENT_EXCHANGE_FILENAME)
 
-        self.product_info_filepath: str = str(get_path_ins.get_config_dir() / PRODUCT_INFO_FILENAME)
+        self.product_info_filepath: str = str(get_path_ins.get_config_dir() / Const.PRODUCT_INFO_FILENAME)
 
     # ===================== 回调函数 =====================
     def onFrontConnected(self) -> None:

@@ -101,17 +101,18 @@ class BarData(BaseData):
     Candlestick bar data of a certain trading period.
     """
     bar_type: Interval = None
-    update_time = datetime.time()
     instrument_id: str = None
     exchange_id: Exchange = None
-    volume: int = 0
-    open_interest: float = 0.0
+    timestamp: datetime.datetime = None  # K线开始时间（标准化后）
+    trading_day: str = None  # 交易日
+    update_time: str = None  # 最后更新时间
     open_price: float = 0.0
     high_price: float = 0.0
     low_price: float = float('inf')
     close_price: float = 0.0
-    last_volume: int = 0  # 上一根K线的成交量，用于计算当前K线的成交量
-    # current_cumulative_volume: int = 0  # 当前累计成交量，用于记录最新tick的累计成交量
+    volume: int = 0
+    open_interest: float = 0.0
+    last_volume: int = 0  # K线开始时的累计成交量，用于计算当前K线的成交量
 
 @dataclass
 class OrderData(BaseData):

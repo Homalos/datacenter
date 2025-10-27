@@ -22,7 +22,7 @@ from typing import Any
 
 import yaml  # type: ignore
 
-from src.constants import INSTRUMENT_EXCHANGE_FILENAME
+from src.constants import Const
 from src.utils.get_path import get_path_ins
 from src.utils.log import get_logger
 
@@ -294,7 +294,7 @@ def load_all_instruments() -> dict[str, str]:
     :return: 所有合约和交易所映射字典
     """
     try:
-        instrument_exchange_json = load_json(str(get_path_ins.get_config_dir() / INSTRUMENT_EXCHANGE_FILENAME))
+        instrument_exchange_json = load_json(str(get_path_ins.get_config_dir() / Const.INSTRUMENT_EXCHANGE_FILENAME))
 
         if instrument_exchange_json:
             _logger.info(f"从文件加载了 {len(instrument_exchange_json)} 个期货合约")

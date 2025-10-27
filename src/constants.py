@@ -9,7 +9,6 @@
 @Software   : PyCharm
 @Description: 全局常量
 """
-from typing import Any
 
 
 class Const:
@@ -31,6 +30,10 @@ class Const:
     BROKERS_FILENAME = "brokers.yaml"  # 多源服务器节点配置文件名
 
     DATA_CENTER_CONFIG_FILENAME = "data_center.yaml"
+
+    DEV_CONFIG_FILENAME = "extra.dev.yaml"
+
+    PROD_CONFIG_FILENAME = "extra.prod.yaml"
 
     LOG_CONFIG_FILENAME = "log_config.yaml"  # 全局日志配置文件名
 
