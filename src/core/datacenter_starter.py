@@ -67,8 +67,13 @@ class DataCenterStarter:
     ```
     """
     
-    def __init__(self):
-        """初始化数据中心启动器"""
+    def __init__(self, register_signals: bool = True):
+        """
+        初始化数据中心启动器
+        
+        Args:
+            register_signals: 是否注册信号处理器（在非主线程中应设为False）
+        """
         self.logger = get_logger(self.__class__.__name__)
         
         # 模块注册表
@@ -81,8 +86,12 @@ class DataCenterStarter:
         # 是否正在运行
         self.running = False
         
-        # 注册系统信号处理
-        self._register_signal_handlers()
+        # 注册系统信号处理（仅在主线程中）
+        if register_signals:
+            try:
+                self._register_signal_handlers()
+            except ValueError as e:
+                self.logger.warning(f"无法注册信号处理器（可能不在主线程）: {e}")
         
         self.logger.info("数据中心启动器初始化完成")
     

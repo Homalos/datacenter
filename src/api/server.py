@@ -7,17 +7,26 @@
 @Author     : Lumosylva
 @Email      : donnymoving@gmail.com
 @Software   : PyCharm
-@Description: 数据中心API服务 (FastAPI) - 提供数据查询和系统管理接口
+@Description: 数据中心API服务 (FastAPI) - 提供数据查询和系统管理接口 + Web控制面板
 """
 import traceback
+import asyncio
 from pathlib import Path
 from typing import Optional
+from datetime import datetime
 
-from fastapi import FastAPI, HTTPException, Query
+from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.responses import JSONResponse, HTMLResponse
 from fastapi.staticfiles import StaticFiles
+from fastapi.middleware.cors import CORSMiddleware
+from sse_starlette.sse import EventSourceResponse
 
-# 这些模块会在运行时注入
+from src.core.datacenter_service import DataCenterService
+
+# 全局数据中心服务实例
+datacenter_service = DataCenterService()
+
+# 这些模块会在运行时注入（保留兼容性）
 storage = None
 contract_manager = None
 metrics_collector = None
@@ -28,8 +37,17 @@ data_archiver = None
 
 app = FastAPI(
     title="Homalos Data Center API",
-    description="期货数据中心 - Tick/K线数据查询 + 系统管理接口",
-    version="0.2.0"
+    description="期货数据中心 - Tick/K线数据查询 + 系统管理接口 + Web控制面板",
+    version="0.3.0"
+)
+
+# 添加CORS中间件（允许前端跨域访问）
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
 )
 
 # 挂载静态文件目录
@@ -397,6 +415,164 @@ async def dashboard():
     
     with open(dashboard_file, 'r', encoding='utf-8') as f:
         return f.read()
+
+
+# ============================================================
+#  数据中心控制接口（新架构）
+# ============================================================
+
+@app.post("/datacenter/start")
+async def start_datacenter():
+    """启动数据中心核心服务"""
+    if datacenter_service.is_starting():
+        return JSONResponse(
+            status_code=400,
+            content={"code": 400, "message": "数据中心正在启动中，请稍候..."}
+        )
+    
+    if datacenter_service.is_running():
+        return JSONResponse(
+            status_code=400,
+            content={"code": 400, "message": "数据中心已在运行"}
+        )
+    
+    success = datacenter_service.start()
+    if success:
+        return {
+            "code": 0,
+            "message": "数据中心启动命令已发送",
+            "data": datacenter_service.get_state_dict()
+        }
+    else:
+        return JSONResponse(
+            status_code=500,
+            content={"code": 500, "message": "启动失败"}
+        )
+
+
+@app.post("/datacenter/stop")
+async def stop_datacenter():
+    """停止数据中心核心服务"""
+    if not datacenter_service.is_running():
+        return JSONResponse(
+            status_code=400,
+            content={"code": 400, "message": "数据中心未在运行"}
+        )
+    
+    success = datacenter_service.stop()
+    if success:
+        return {
+            "code": 0,
+            "message": "数据中心停止命令已发送",
+            "data": datacenter_service.get_state_dict()
+        }
+    else:
+        return JSONResponse(
+            status_code=500,
+            content={"code": 500, "message": "停止失败"}
+        )
+
+
+@app.post("/datacenter/restart")
+async def restart_datacenter():
+    """重启数据中心核心服务"""
+    success = datacenter_service.restart()
+    if success:
+        return {
+            "code": 0,
+            "message": "数据中心重启命令已发送",
+            "data": datacenter_service.get_state_dict()
+        }
+    else:
+        return JSONResponse(
+            status_code=500,
+            content={"code": 500, "message": "重启失败"}
+        )
+
+
+@app.get("/datacenter/status")
+async def get_datacenter_status():
+    """获取数据中心状态"""
+    return {
+        "code": 0,
+        "message": "success",
+        "data": datacenter_service.get_state_dict()
+    }
+
+
+@app.get("/datacenter/logs")
+async def get_datacenter_logs(limit: int = Query(100, ge=1, le=1000)):
+    """获取数据中心日志"""
+    logs = datacenter_service.get_logs(limit=limit)
+    return {
+        "code": 0,
+        "message": "success",
+        "data": logs
+    }
+
+
+@app.get("/datacenter/logs/stream")
+async def stream_datacenter_logs(request: Request):
+    """
+    实时推送数据中心日志（SSE）
+    
+    使用方式：
+    const eventSource = new EventSource('/datacenter/logs/stream');
+    eventSource.onmessage = (event) => {
+        const log = JSON.parse(event.data);
+        console.log(log);
+    };
+    """
+    async def event_generator():
+        """日志事件生成器"""
+        # 用于存储最新日志的队列
+        log_queue = asyncio.Queue()
+        loop = asyncio.get_event_loop()
+        
+        def log_callback(log_entry):
+            """日志回调函数（线程安全）"""
+            try:
+                # 使用 call_soon_threadsafe 在事件循环中安全地添加日志
+                loop.call_soon_threadsafe(log_queue.put_nowait, log_entry)
+            except:
+                pass
+        
+        # 注册日志回调
+        datacenter_service.add_log_callback(log_callback)
+        
+        try:
+            # 首先发送最近的100条日志
+            recent_logs = datacenter_service.get_logs(limit=100)
+            for log in recent_logs:
+                yield {
+                    "event": "log",
+                    "data": log
+                }
+            
+            # 然后持续推送新日志
+            while True:
+                if await request.is_disconnected():
+                    break
+                
+                try:
+                    # 等待新日志（超时1秒）
+                    log_entry = await asyncio.wait_for(log_queue.get(), timeout=1.0)
+                    yield {
+                        "event": "log",
+                        "data": log_entry
+                    }
+                except asyncio.TimeoutError:
+                    # 发送心跳
+                    yield {
+                        "event": "ping",
+                        "data": {"timestamp": datetime.now().isoformat()}
+                    }
+        
+        finally:
+            # 清理回调
+            datacenter_service.remove_log_callback(log_callback)
+    
+    return EventSourceResponse(event_generator())
 
 
 # ============================================================
