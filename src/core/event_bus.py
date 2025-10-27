@@ -32,7 +32,7 @@ from queue import Empty, Full
 
 from src.core import trace_context
 from src.core.event import Event, EventType
-from src.log.logger import get_logger
+from src.utils.log.logger import get_logger
 
 
 class EventBus:

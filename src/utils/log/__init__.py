@@ -9,6 +9,6 @@
 @Software   : PyCharm
 @Description: description
 """
-from src.log.logger import get_logger
+from src.utils.log.logger import get_logger
 
 logger = get_logger()

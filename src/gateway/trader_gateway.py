@@ -44,7 +44,7 @@ from src.gateway.gateway_helper import (
     build_contract_data, build_rtn_order_data, build_trade_data, update_position_detail
 )
 from src.utils.get_path import get_path_ins
-from src.log import get_logger
+from src.utils.log import get_logger
 from src.utils.utility import prepare_address, write_json, load_ini, write_ini, del_num, delete_file, sleep
 
 

@@ -24,7 +24,7 @@ import yaml  # type: ignore
 
 from src.constants import INSTRUMENT_EXCHANGE_FILENAME
 from src.utils.get_path import get_path_ins
-from src.log import get_logger
+from src.utils.log import get_logger
 
 _logger = get_logger(__name__)
 
@@ -189,9 +189,8 @@ def write_ini(config_parser: configparser.ConfigParser, file_path: str) -> None:
         file_path (str): 要写入的ini文件路径。
 
     """
-    # with open(file_path, 'w', encoding='utf-8') as f:
-    #     config_parser.write(f)
-    config_parser.write(open(file_path, "w", encoding='utf-8'))
+    with open(file_path, "w", encoding='utf-8') as f:
+        config_parser.write(f)  # type: ignore
 
 def load_yaml(config_path: str) -> dict:
     """

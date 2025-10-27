@@ -24,7 +24,7 @@ from src.core.pack_payload import PackPayload
 from src.ctp.api import MdApi
 from src.gateway.gateway_const import REASON_MAPPING, symbol_contract_map, CHINA_TZ
 from src.gateway.gateway_helper import extract_error_msg, build_tick_data
-from src.log import get_logger
+from src.utils.log import get_logger
 from src.utils.utility import prepare_address
 
 
