@@ -31,12 +31,10 @@ from typing import Any
 import yaml
 from loguru import logger
 
-from src.constants import CONFIG_DIR_NAME, LOG_CONFIG_FILENAME, log_time_format
+from src.constants import Const
 from src.core.trace_context import get_trace_id
 
-__all__ = ["logger", "get_logger", "log_detail", "log_object", "time_log_detail"]
-
-from src.utils.time import time_module_ins
+__all__ = ["logger", "get_logger"]
 
 # 从当前文件往上获取项目根目录
 current_file = Path(__file__).resolve()
@@ -60,15 +58,15 @@ def _load_log_config(config_filepath: str) -> dict:
 
 # ===================== 初始化全局日志配置 =====================
 # 获取日志配置文件名
-log_config_name = f"{CONFIG_DIR_NAME}/{LOG_CONFIG_FILENAME}"
+log_config_name = f"{Const.CONFIG_DIR_NAME}/{Const.LOG_CONFIG_FILENAME}"
 config_path = str(root_path / log_config_name)
 # 加载日志配置
 config = _load_log_config(config_path)
 cfg = config.get("logging", {})
 
 is_debug = cfg.get("is_debug", False)  # 是否开启 DEBUG 模式
-log_filename: str = cfg.get("log_filename", "homalos")
-error_filename: str = cfg.get("error_filename", "homalos_error")
+log_filename: str = cfg.get("log_filename", "datacenter")
+error_filename: str = cfg.get("error_filename", "datacenter_error")
 filename_format: str = cfg.get("filename_format", "%Y%m%d")
 
 log_dir_name: str = cfg.get("log_dir_name", "logs")
@@ -185,41 +183,6 @@ def get_logger(context: str = "Homalos") -> Any:
     :return: logger
     """
     return logger.bind(context=context)
-
-
-def time_log_detail(*args):
-    """
-    记录其他文件，文件名称：日期Detail.txt
-    :param args:
-    :return:
-    """
-    if not is_detail_log:
-        return
-    content = ""
-    for arg in args:
-        content += str(arg)
-    with open("{}/{}detail.txt".format(str(log_dir_path), time_module_ins.now().strftime(filename_format)),
-              "a", encoding='utf-8') as f:
-        f.write('{}: {}\n'.format(time_module_ins.now().strftime(log_time_format)[:-3], content))
-
-
-def log_detail(*args):
-    content = ""
-    for arg in args:
-        content += str(arg)
-    # 使用绑定了context的logger，避免KeyError: 'context'
-    # get_logger("Detail").info(content)
-    with open("{}/{}Detail.txt".format(str(log_dir_path), time_module_ins.now().strftime(filename_format)),
-              "a", encoding='utf-8') as f:
-        f.write('{}\n'.format(content))
-
-
-def log_object(obj):
-    # 使用绑定了context的logger，避免KeyError: 'context'
-    # detail_content = '\n'.join(['%s:%s' % item for item in obj.__dict__.items()])
-    # get_logger("Detail").info(detail_content)
-    log_detail('\n'.join(['%s:%s' % item for item in obj.__dict__.items()]))
-
 
 # ===================== SSE日志流支持 =====================
 # 根据环境变量决定是否启用SSE日志

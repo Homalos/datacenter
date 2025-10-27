@@ -25,19 +25,9 @@ class Const:
 
     RES_USAGE_DIR_NAME = "resource_usage"  # 资源占用文件目录名
 
-    TRADING_DIR_NAME = "trading"
-
-    TRADING_FLOW_DIR_NAME = "trading_flow"
-
     CONFIG_DIR_NAME = "config"  # 配置目录名
 
     # ================== 项目中文件名称 ==================
-    SYSTEM_CONFIG_FILENAME = "system.yaml"
-
-    SYSTEM_DEV_CONFIG_FILENAME = "extra.dev.yaml"
-
-    SYSTEM_PROD_CONFIG_FILENAME = "extra.prod.yaml"
-
     BROKERS_FILENAME = "brokers.yaml"  # 多源服务器节点配置文件名
 
     DATA_CENTER_CONFIG_FILENAME = "data_center.yaml"
@@ -47,8 +37,6 @@ class Const:
     INSTRUMENT_EXCHANGE_FILENAME = "instrument_exchange.json"  # 期货合约与交易所映射信息文件名
 
     PRODUCT_INFO_FILENAME = "product_info.ini"  # 合约乘数及手续费信息文件名
-
-    STRATEGY_REGISTRY_FILENAME = "strategy_registry.json"   # 策略注册文件名
 
     HOLIDAY_FILENAME = "holidays.json"  # 节假日文件名称
 
@@ -60,8 +48,6 @@ class Const:
     log_time_format = "%Y-%m-%d %H:%M:%S.%f"  # 日志文件中时间格式
 
     print_time_format = "%Y-%m-%d %H:%M:%S.%f"  # 控制台打印的时间格式
-
-    strategy_map: dict[str, Any] = {}
 
     # tick合成K线系统
     tick_to_kline_sys = None
@@ -80,5 +66,3 @@ class Const:
 
     # 在程序首次运行时是否抹除今天之前的记录
     is_first = False
-
-    trade_file_head = ['自然日', '交易日', '时间', '标的', '方向', '委托价', '成交价', '成交量', '平仓盈亏', '手续费']

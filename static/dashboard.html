@@ -1,0 +1,572 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <link rel="icon" type="image/svg+xml" href="/static/vue.svg" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>回测仪表板 - Homalos Data Center</title>
+    
+    <!-- 引入 ECharts -->
+    <script src="https://cdn.jsdelivr.net/npm/echarts@5.4.3/dist/echarts.min.js"></script>
+    
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+        
+        body {
+            font-family: 'Microsoft YaHei', 'Arial', sans-serif;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            padding: 20px;
+        }
+        
+        .container {
+            max-width: 1800px;
+            margin: 0 auto;
+            background: white;
+            border-radius: 15px;
+            box-shadow: 0 10px 40px rgba(0,0,0,0.3);
+            overflow: hidden;
+        }
+        
+        .header {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            padding: 30px;
+            text-align: center;
+        }
+        
+        .header h1 {
+            font-size: 32px;
+            margin-bottom: 10px;
+        }
+        
+        .header p {
+            font-size: 14px;
+            opacity: 0.9;
+        }
+        
+        .metrics-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
+            gap: 20px;
+            padding: 30px;
+            background: #f8f9fa;
+        }
+        
+        .metric-card {
+            background: white;
+            padding: 25px;
+            border-radius: 10px;
+            box-shadow: 0 2px 10px rgba(0,0,0,0.08);
+            transition: transform 0.3s, box-shadow 0.3s;
+        }
+        
+        .metric-card:hover {
+            transform: translateY(-5px);
+            box-shadow: 0 5px 20px rgba(0,0,0,0.15);
+        }
+        
+        .metric-label {
+            font-size: 14px;
+            color: #666;
+            margin-bottom: 10px;
+            font-weight: 500;
+        }
+        
+        .metric-value {
+            font-size: 36px;
+            font-weight: bold;
+            color: #333;
+        }
+        
+        .metric-value.positive {
+            color: #00b09b;
+        }
+        
+        .metric-value.negative {
+            color: #ff416c;
+        }
+        
+        .charts-container {
+            padding: 30px;
+        }
+        
+        .chart-box {
+            margin-bottom: 30px;
+            background: white;
+            border-radius: 10px;
+            box-shadow: 0 2px 10px rgba(0,0,0,0.08);
+            padding: 20px;
+        }
+        
+        .chart-title {
+            font-size: 20px;
+            font-weight: bold;
+            color: #333;
+            margin-bottom: 15px;
+            padding-bottom: 10px;
+            border-bottom: 2px solid #667eea;
+        }
+        
+        .chart {
+            width: 100%;
+            height: 500px;
+        }
+        
+        .loading {
+            text-align: center;
+            padding: 50px;
+            font-size: 18px;
+            color: #666;
+        }
+        
+        .error {
+            text-align: center;
+            padding: 50px;
+            font-size: 18px;
+            color: #ff416c;
+        }
+        
+        .controls {
+            padding: 20px 30px;
+            background: #f8f9fa;
+            border-top: 1px solid #ddd;
+        }
+        
+        .btn {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            border: none;
+            padding: 12px 30px;
+            border-radius: 25px;
+            font-size: 14px;
+            cursor: pointer;
+            transition: transform 0.2s, box-shadow 0.2s;
+            margin-right: 10px;
+        }
+        
+        .btn:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 5px 15px rgba(102,126,234,0.4);
+        }
+        
+        .btn:active {
+            transform: translateY(0);
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <!-- 头部 -->
+        <div class="header">
+            <h1>📊 回测仪表板</h1>
+            <p>Homalos Data Center - 交互式可视化分析</p>
+        </div>
+        
+        <!-- 绩效指标卡片 -->
+        <div class="metrics-grid" id="metrics">
+            <div class="loading">加载中...</div>
+        </div>
+        
+        <!-- 图表区域 -->
+        <div class="charts-container">
+            <!-- 交易点位图 -->
+            <div class="chart-box">
+                <div class="chart-title">📈 价格与交易点位</div>
+                <div id="tradeChart" class="chart"></div>
+            </div>
+            
+            <!-- 资金曲线图 -->
+            <div class="chart-box">
+                <div class="chart-title">💰 资金曲线</div>
+                <div id="equityChart" class="chart"></div>
+            </div>
+            
+            <!-- 回撤曲线图 -->
+            <div class="chart-box">
+                <div class="chart-title">📉 回撤曲线</div>
+                <div id="drawdownChart" class="chart"></div>
+            </div>
+            
+            <!-- 持仓变化图 -->
+            <div class="chart-box">
+                <div class="chart-title">📊 持仓变化</div>
+                <div id="positionChart" class="chart"></div>
+            </div>
+        </div>
+        
+        <!-- 控制按钮 -->
+        <div class="controls">
+            <button class="btn" onclick="location.reload()">🔄 刷新数据</button>
+            <button class="btn" onclick="exportData()">💾 导出数据</button>
+            <button class="btn" onclick="window.open('/docs')">📚 API文档</button>
+        </div>
+    </div>
+    
+    <script>
+        // 初始化图表
+        const tradeChart = echarts.init(document.getElementById('tradeChart'));
+        const equityChart = echarts.init(document.getElementById('equityChart'));
+        const drawdownChart = echarts.init(document.getElementById('drawdownChart'));
+        const positionChart = echarts.init(document.getElementById('positionChart'));
+        
+        // 加载最新的回测数据
+        async function loadBacktestData() {
+            try {
+                // 获取回测结果列表
+                const listResponse = await fetch('/backtest/list');
+                const listData = await listResponse.json();
+                
+                if (listData.results.length === 0) {
+                    document.getElementById('metrics').innerHTML = '<div class="error">暂无回测数据<br><small>请先运行回测：python examples/run_backtest.py</small></div>';
+                    return;
+                }
+                
+                // 获取最新的回测数据
+                const latestFile = listData.results[0].filename;
+                const dataResponse = await fetch(`/backtest/export/${latestFile}`);
+                const data = await dataResponse.json();
+                
+                // 渲染指标卡片
+                renderMetrics(data.metrics);
+                
+                // 渲染图表
+                renderTradeChart(data.account_history);
+                renderEquityChart(data.account_history);
+                renderDrawdownChart(data.account_history);
+                renderPositionChart(data.account_history);
+                
+            } catch (error) {
+                console.error('加载数据失败:', error);
+                document.getElementById('metrics').innerHTML = '<div class="error">数据加载失败<br><small>' + error.message + '</small></div>';
+            }
+        }
+        
+        // 渲染指标卡片
+        function renderMetrics(metrics) {
+            const totalReturn = metrics['Total Return'] || 0;
+            const sharpeRatio = metrics['Sharpe Ratio'] || 0;
+            const maxDrawdown = metrics['Max Drawdown'] || 0;
+            const finalEquity = metrics['Final Equity'] || 0;
+            
+            const html = `
+                <div class="metric-card">
+                    <div class="metric-label">总收益率</div>
+                    <div class="metric-value ${totalReturn > 0 ? 'positive' : 'negative'}">
+                        ${(totalReturn * 100).toFixed(2)}%
+                    </div>
+                </div>
+                <div class="metric-card">
+                    <div class="metric-label">夏普比率</div>
+                    <div class="metric-value">${sharpeRatio.toFixed(2)}</div>
+                </div>
+                <div class="metric-card">
+                    <div class="metric-label">最大回撤</div>
+                    <div class="metric-value negative">${(maxDrawdown * 100).toFixed(2)}%</div>
+                </div>
+                <div class="metric-card">
+                    <div class="metric-label">最终权益</div>
+                    <div class="metric-value">${finalEquity.toLocaleString('zh-CN', {minimumFractionDigits: 0, maximumFractionDigits: 0})}</div>
+                </div>
+            `;
+            
+            document.getElementById('metrics').innerHTML = html;
+        }
+        
+        // 渲染交易点位图
+        function renderTradeChart(history) {
+            const times = history.map(h => h.datetime);
+            const prices = history.map(h => h.price);
+            const buys = history.filter(h => h.side === 'BUY');
+            const sells = history.filter(h => h.side === 'SELL');
+            
+            const buyData = buys.map(h => [h.datetime, h.price]);
+            const sellData = sells.map(h => [h.datetime, h.price]);
+            
+            // 计算价格范围，优化Y轴显示
+            const minPrice = Math.min(...prices);
+            const maxPrice = Math.max(...prices);
+            const priceRange = maxPrice - minPrice;
+            const padding = priceRange * 0.1; // 上下留10%空间
+            
+            const option = {
+                title: { text: '价格与交易点位', left: 'center' },
+                tooltip: {
+                    trigger: 'axis',
+                    axisPointer: { type: 'cross' },
+                    formatter: function(params) {
+                        let result = params[0].name + '<br/>';
+                        params.forEach(param => {
+                            if (param.value != null) {
+                                result += param.marker + param.seriesName + ': ' + param.value + '<br/>';
+                            }
+                        });
+                        return result;
+                    }
+                },
+                legend: {
+                    data: ['价格', '买入', '卖出'],
+                    top: '8%'
+                },
+                grid: { left: '3%', right: '4%', bottom: '15%', containLabel: true },
+                xAxis: {
+                    type: 'category',
+                    data: times,
+                    axisLabel: {
+                        rotate: 45,
+                        interval: Math.floor(times.length / 10)
+                    }
+                },
+                yAxis: { 
+                    type: 'value',
+                    scale: true,  // 不从0开始
+                    min: Math.floor(minPrice - padding),
+                    max: Math.ceil(maxPrice + padding),
+                    splitNumber: 8
+                },
+                dataZoom: [
+                    { type: 'slider', start: 0, end: 100 },
+                    { type: 'inside' }
+                ],
+                series: [
+                    {
+                        name: '价格',
+                        type: 'line',
+                        data: prices,
+                        smooth: false,
+                        lineStyle: { width: 1.5, color: '#888' },
+                        showSymbol: false
+                    },
+                    {
+                        name: '买入',
+                        type: 'scatter',
+                        data: buyData,
+                        symbol: 'triangle',
+                        symbolSize: 15,
+                        itemStyle: { color: '#00DA3C' },
+                        z: 10
+                    },
+                    {
+                        name: '卖出',
+                        type: 'scatter',
+                        data: sellData,
+                        symbol: 'pin',
+                        symbolSize: 15,
+                        itemStyle: { color: '#EC0000' },
+                        z: 10
+                    }
+                ]
+            };
+            
+            tradeChart.setOption(option);
+        }
+        
+        // 渲染资金曲线图
+        function renderEquityChart(history) {
+            const times = history.map(h => h.datetime);
+            const equity = history.map(h => h.cash);
+            
+            // 计算资金范围，优化Y轴
+            const minEquity = Math.min(...equity);
+            const maxEquity = Math.max(...equity);
+            const equityRange = maxEquity - minEquity;
+            const padding = equityRange > 0 ? equityRange * 0.2 : 1000; // 上下留20%空间
+            
+            const option = {
+                title: { text: '资金曲线', left: 'center' },
+                tooltip: {
+                    trigger: 'axis',
+                    formatter: function(params) {
+                        return params[0].name + '<br/>资金: ¥' + params[0].value.toLocaleString('zh-CN');
+                    }
+                },
+                legend: { data: ['资金'], top: '8%' },
+                grid: { left: '3%', right: '4%', bottom: '15%', containLabel: true },
+                xAxis: {
+                    type: 'category',
+                    data: times,
+                    boundaryGap: false,
+                    axisLabel: {
+                        rotate: 45,
+                        interval: Math.floor(times.length / 10)
+                    }
+                },
+                yAxis: {
+                    type: 'value',
+                    scale: true,  // 不从0开始
+                    min: Math.floor(minEquity - padding),
+                    max: Math.ceil(maxEquity + padding),
+                    splitNumber: 6,
+                    axisLabel: {
+                        formatter: function(value) {
+                            return '¥' + value.toLocaleString('zh-CN');
+                        }
+                    }
+                },
+                dataZoom: [
+                    { type: 'slider', start: 0, end: 100 },
+                    { type: 'inside' }
+                ],
+                series: [{
+                    name: '资金',
+                    type: 'line',
+                    data: equity,
+                    smooth: true,
+                    lineStyle: { width: 3, color: '#3398DB' },
+                    areaStyle: {
+                        color: {
+                            type: 'linear',
+                            x: 0, y: 0, x2: 0, y2: 1,
+                            colorStops: [
+                                { offset: 0, color: 'rgba(51,152,219,0.5)' },
+                                { offset: 1, color: 'rgba(51,152,219,0.1)' }
+                            ]
+                        }
+                    },
+                    showSymbol: false
+                }]
+            };
+            
+            equityChart.setOption(option);
+        }
+        
+        // 渲染回撤曲线图
+        function renderDrawdownChart(history) {
+            const times = history.map(h => h.datetime);
+            const equity = history.map(h => h.cash);
+            
+            // 计算回撤
+            let cummax = equity[0];
+            const drawdown = equity.map(val => {
+                cummax = Math.max(cummax, val);
+                return parseFloat(((val - cummax) / cummax * 100).toFixed(2));
+            });
+            
+            const minDrawdown = Math.min(...drawdown);
+            const maxDrawdown = Math.max(...drawdown);
+            
+            const option = {
+                title: { 
+                    text: '回撤曲线', 
+                    left: 'center',
+                    subtext: `最大回撤: ${minDrawdown.toFixed(2)}%`
+                },
+                tooltip: {
+                    trigger: 'axis',
+                    formatter: function(params) {
+                        return params[0].name + '<br/>回撤: ' + params[0].value + '%';
+                    }
+                },
+                legend: { data: ['回撤'], top: '8%' },
+                grid: { left: '3%', right: '4%', bottom: '15%', containLabel: true },
+                xAxis: {
+                    type: 'category',
+                    data: times,
+                    boundaryGap: false,
+                    axisLabel: {
+                        rotate: 45,
+                        interval: Math.floor(times.length / 10)
+                    }
+                },
+                yAxis: {
+                    type: 'value',
+                    scale: true,
+                    min: function(value) {
+                        return Math.floor(minDrawdown - 0.1);
+                    },
+                    max: 0.5,  // 固定上限为0.5%
+                    splitNumber: 6,
+                    axisLabel: { formatter: '{value}%' }
+                },
+                dataZoom: [
+                    { type: 'slider', start: 0, end: 100 },
+                    { type: 'inside' }
+                ],
+                series: [{
+                    name: '回撤',
+                    type: 'line',
+                    data: drawdown,
+                    smooth: true,
+                    lineStyle: { width: 3, color: '#EC0000' },
+                    areaStyle: {
+                        color: {
+                            type: 'linear',
+                            x: 0, y: 0, x2: 0, y2: 1,
+                            colorStops: [
+                                { offset: 0, color: 'rgba(236,0,0,0.3)' },
+                                { offset: 1, color: 'rgba(236,0,0,0.05)' }
+                            ]
+                        }
+                    },
+                    showSymbol: false
+                }]
+            };
+            
+            drawdownChart.setOption(option);
+        }
+        
+        // 渲染持仓变化图
+        function renderPositionChart(history) {
+            const times = history.map(h => h.datetime);
+            const positions = history.map(h => h.position || 0);
+            
+            const option = {
+                title: { text: '持仓变化', left: 'center' },
+                tooltip: {
+                    trigger: 'axis',
+                    formatter: function(params) {
+                        return params[0].name + '<br/>持仓: ' + params[0].value;
+                    }
+                },
+                legend: { data: ['持仓'], top: '8%' },
+                grid: { left: '3%', right: '4%', bottom: '15%', containLabel: true },
+                xAxis: {
+                    type: 'category',
+                    data: times,
+                    axisLabel: {
+                        rotate: 45,
+                        interval: Math.floor(times.length / 10)
+                    }
+                },
+                yAxis: { type: 'value' },
+                dataZoom: [
+                    { type: 'slider', start: 0, end: 100 },
+                    { type: 'inside' }
+                ],
+                series: [{
+                    name: '持仓',
+                    type: 'bar',
+                    data: positions,
+                    itemStyle: {
+                        color: function(params) {
+                            return params.value > 0 ? '#00DA3C' : params.value < 0 ? '#EC0000' : '#888';
+                        }
+                    }
+                }]
+            };
+            
+            positionChart.setOption(option);
+        }
+        
+        // 导出数据
+        function exportData() {
+            alert('导出功能开发中...');
+        }
+        
+        // 响应式调整
+        window.addEventListener('resize', function() {
+            tradeChart.resize();
+            equityChart.resize();
+            drawdownChart.resize();
+            positionChart.resize();
+        });
+        
+        // 页面加载时获取数据
+        loadBacktestData();
+    </script>
+</body>
+</html>
+
