@@ -63,4 +63,10 @@ ENTER EXECUTE MODE
 
 ENTER PLAN MODE，状态：执行成功，帮我继续优化Web
 
+python start_web.py
 
+如果队列满时能否进行动态扩容机制呢而不是阻塞等待呢
+
+
+
+ENTER PLAN MODE，请根据上述RESEARCH制定优化方案。补充：1.写入频率用定时触发，每分钟触发一次写入，而不是固定tick条数。2.文件锁定方案：方案1：threading.Lock（进程内锁）。3.数据去重：选项B：追加后定期去重，在非交易时间（如每日16:00收盘后）统一去重，配合压缩流程：去重 → 排序 → 压缩为tar.gz

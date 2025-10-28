@@ -10,6 +10,8 @@
 @Description: 混合存储 - 智能路由SQLite（热数据）和CSV（冷数据，延迟压缩）
 """
 import pandas as pd
+import threading
+import time
 from datetime import datetime, timedelta
 from typing import Optional
 from collections import deque
@@ -46,7 +48,8 @@ class HybridStorage:
                  parquet_tick_path: str = "data/ticks",
                  parquet_kline_path: str = "data/klines",
                  retention_days: int = 7,
-                 batch_size: int = 100,
+                 flush_interval: int = 60,
+                 max_buffer_size: int = 10000,
                  trading_day_manager = None):
         """
         初始化混合存储
@@ -54,10 +57,11 @@ class HybridStorage:
         Args:
             event_bus: 事件总线（可选，如果提供则自动订阅 TICK 事件）
             sqlite_db_path: SQLite数据库路径
-            parquet_tick_path: Tick Parquet文件路径
-            parquet_kline_path: K线 Parquet文件路径
+            parquet_tick_path: Tick CSV文件路径
+            parquet_kline_path: K线 CSV文件路径
             retention_days: SQLite数据保留天数
-            batch_size: Tick批量写入大小（默认100条）
+            flush_interval: 定时刷新间隔（秒），默认60秒（1分钟）
+            max_buffer_size: 缓冲区上限，默认10000条（防止内存爆炸）
             trading_day_manager: 交易日管理器
         """
         self.logger = get_logger(self.__class__.__name__)
@@ -65,10 +69,11 @@ class HybridStorage:
         # SQLite存储层（热数据）
         self.sqlite_storage = SQLiteStorage(
             db_path=sqlite_db_path,
-            retention_days=retention_days
+            retention_days=retention_days,
+            trading_day_manager=trading_day_manager
         )
         
-        # Parquet存储层（冷数据）- 分别管理Tick和K线
+        # CSV存储层（冷数据）- 分别管理Tick和K线
         self.parquet_tick_storage = DataStorage(
             base_path=parquet_tick_path,
             trading_day_manager=trading_day_manager
@@ -79,27 +84,105 @@ class HybridStorage:
         )
         
         self.retention_days = retention_days
-        self.batch_size = batch_size
+        self.flush_interval = flush_interval
+        self.max_buffer_size = max_buffer_size
         
-        # Tick 数据缓冲区（批量写入以提高性能）
-        self.tick_buffer: deque[TickData] = deque(maxlen=batch_size * 2)
+        # Tick 数据缓冲区（无上限，但会根据max_buffer_size触发提前刷新）
+        self.tick_buffer: deque[TickData] = deque()
+        
+        # 统计计数器
+        self._tick_recv_count = 0
+        
+        # 定时刷新线程
+        self._flush_thread: Optional[threading.Thread] = None
+        self._stop_flush = threading.Event()
+        
+        # 启动定时刷新线程
+        self._start_flush_thread()
         
         # 如果提供了事件总线，订阅 TICK 事件
         if event_bus:
             event_bus.subscribe(EventType.TICK, self._on_tick)
-            self.logger.info("已订阅 TICK 事件，将自动保存原始行情数据")
+            self.logger.info(
+                f"已订阅 TICK 事件，定时刷新: {flush_interval}秒，缓冲区上限: {max_buffer_size}条"
+            )
         
         self.logger.info(
             f"混合存储初始化完成，SQLite保留{retention_days}天，"
-            f"Tick数据: {parquet_tick_path}，K线数据: {parquet_kline_path}，批量大小: {batch_size}"
+            f"定时刷新: 每{flush_interval}秒，缓冲区上限: {max_buffer_size}条"
         )
+    
+    def _start_flush_thread(self) -> None:
+        """启动定时刷新线程"""
+        self._stop_flush.clear()
+        self._flush_thread = threading.Thread(
+            target=self._flush_worker,
+            name="HybridStorage-FlushWorker",
+            daemon=True
+        )
+        self._flush_thread.start()
+        self.logger.info(f"定时刷新线程已启动，间隔: {self.flush_interval}秒")
+    
+    def _flush_worker(self) -> None:
+        """定时刷新工作线程"""
+        last_flush_time = time.time()
+        
+        while not self._stop_flush.is_set():
+            try:
+                # 检查是否到达刷新时间
+                current_time = time.time()
+                elapsed = current_time - last_flush_time
+                
+                if elapsed >= self.flush_interval:
+                    if len(self.tick_buffer) > 0:
+                        self.logger.info(
+                            f"⏰ 定时触发刷新，缓冲区: {len(self.tick_buffer)} 条Tick"
+                        )
+                        self._flush_tick_buffer()
+                    last_flush_time = current_time
+                
+                # 短暂休眠（避免CPU占用）
+                time.sleep(1)  # 每秒检查一次
+                
+            except Exception as e:
+                self.logger.error(f"定时刷新线程异常: {e}", exc_info=True)
+                time.sleep(5)  # 异常后等待5秒
+    
+    def stop(self) -> None:
+        """停止定时刷新线程，刷新剩余缓冲区"""
+        self.logger.info("正在停止 HybridStorage...")
+        
+        # 停止定时刷新线程
+        self._stop_flush.set()
+        if self._flush_thread and self._flush_thread.is_alive():
+            self._flush_thread.join(timeout=5.0)
+            self.logger.info("定时刷新线程已停止")
+        
+        # 刷新剩余缓冲区
+        if len(self.tick_buffer) > 0:
+            self.logger.warning(
+                f"优雅关闭：刷新剩余 {len(self.tick_buffer)} 条Tick..."
+            )
+            self._flush_tick_buffer()
+            self.logger.info("✓ 缓冲区已刷新")
+        
+        self.logger.info("HybridStorage 已停止")
     
     def _on_tick(self, event: Event) -> None:
         """
-        处理 TICK 事件（批量保存）
+        处理 TICK 事件（定时刷新 + 缓冲区安全阀）
         
         Args:
             event: TICK 事件
+            
+        触发策略：
+            1. 主策略：定时刷新（每60秒）- 减少锁竞争
+            2. 安全阀：缓冲区达到上限时提前刷新 - 防止内存爆炸
+        
+        Note:
+            - 主要由定时刷新线程触发写入（每分钟一次）
+            - 当缓冲区达到max_buffer_size时，触发紧急刷新
+            - 程序退出时由stop()方法刷新剩余数据
         """
         try:
             # 解析 Tick 数据
@@ -115,19 +198,26 @@ class HybridStorage:
             
             # 添加到缓冲区
             self.tick_buffer.append(tick)
-            
-            # 每100条打印一次日志
-            if not hasattr(self, '_tick_recv_count'):
-                self._tick_recv_count = 0
             self._tick_recv_count += 1
             
-            if self._tick_recv_count % 100 == 0:
-                self.logger.info(f"✓ HybridStorage已接收 {self._tick_recv_count} 条Tick | 缓冲区: {len(self.tick_buffer)}/{self.batch_size}")
-            
-            # 当缓冲区达到批量大小时，执行批量写入
-            if len(self.tick_buffer) >= self.batch_size:
-                self.logger.info(f"缓冲区已满({len(self.tick_buffer)}条)，开始批量保存...")
+            # ⚠️ 安全阀：检查缓冲区是否达到上限
+            buffer_size = len(self.tick_buffer)
+            if buffer_size >= self.max_buffer_size:
+                buffer_usage = buffer_size / self.max_buffer_size * 100
+                self.logger.warning(
+                    f"⚠️ 缓冲区达到上限 ({buffer_size}/{self.max_buffer_size} 条, {buffer_usage:.1f}%)，"
+                    f"触发紧急刷新"
+                )
+                # 同步刷新（确保缓冲区被清空）
                 self._flush_tick_buffer()
+            
+            # 每1000条打印统计（监控缓冲区使用率）
+            elif self._tick_recv_count % 1000 == 0:
+                buffer_usage = buffer_size / self.max_buffer_size * 100
+                self.logger.info(
+                    f"✓ HybridStorage已接收 {self._tick_recv_count} 条Tick | "
+                    f"缓冲区: {buffer_size}/{self.max_buffer_size} ({buffer_usage:.1f}%，等待定时刷新)"
+                )
         
         except Exception as e:
             self.logger.error(f"处理 TICK 事件失败: {e}", exc_info=True)
@@ -151,7 +241,7 @@ class HybridStorage:
                 if tick.trading_day and tick.update_time:
                     try:
                         datetime_val = pd.to_datetime(f"{tick.trading_day} {tick.update_time}.{tick.update_millisec:03d}")
-                    except:
+                    except Exception:
                         datetime_val = pd.to_datetime(f"{tick.trading_day} {tick.update_time}")
                 
                 # 严格按照 TickData 定义的所有字段
@@ -254,7 +344,7 @@ class HybridStorage:
             self.logger.info(f"  → 保存 {len(df)} 条Tick到SQLite...")
             # 1. 保存到SQLite（热数据，快速查询）
             self.sqlite_storage.save_ticks(df)
-            self.logger.info(f"  ✓ SQLite保存成功")
+            self.logger.info("  ✓ SQLite保存成功")
             
             # 2. 保存到CSV归档（冷数据，按交易日统一保存）
             # 不传date参数，使用trading_day_manager的交易日

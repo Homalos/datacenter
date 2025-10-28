@@ -150,13 +150,33 @@ class DataCompressor:
             
             self.logger.info(f"找到 {len(trading_days_to_compress)} 个交易日待压缩")
             
-            # 压缩Tick数据
+            # 步骤1: 去重和排序Tick数据
+            self.logger.info("步骤1/4: 去重和排序Tick数据...")
+            for trading_day in trading_days_to_compress:
+                self._deduplicate_folder(
+                    self.tick_storage.base_path,
+                    trading_day,
+                    "Tick"
+                )
+            
+            # 步骤2: 压缩Tick数据
+            self.logger.info("步骤2/4: 压缩Tick数据...")
             tick_success = 0
             for trading_day in trading_days_to_compress:
                 if self.tick_storage.compress_trading_day_folder(trading_day):
                     tick_success += 1
             
-            # 压缩K线数据
+            # 步骤3: 去重和排序K线数据
+            self.logger.info("步骤3/4: 去重和排序K线数据...")
+            for trading_day in trading_days_to_compress:
+                self._deduplicate_folder(
+                    self.kline_storage.base_path,
+                    trading_day,
+                    "K线"
+                )
+            
+            # 步骤4: 压缩K线数据
+            self.logger.info("步骤4/4: 压缩K线数据...")
             kline_success = 0
             for trading_day in trading_days_to_compress:
                 if self.kline_storage.compress_trading_day_folder(trading_day):
@@ -175,6 +195,44 @@ class DataCompressor:
             
         except Exception as e:
             self.logger.error(f"执行压缩任务失败: {e}", exc_info=True)
+    
+    def _deduplicate_folder(self, base_path: str, trading_day: str, data_type: str) -> None:
+        """
+        去重和排序文件夹中所有CSV文件
+        
+        Args:
+            base_path: 数据根目录（如 data/ticks）
+            trading_day: 交易日（如 20251028）
+            data_type: 数据类型（"Tick" 或 "K线"）
+        """
+        folder_path = Path(base_path) / trading_day
+        
+        if not folder_path.exists() or not folder_path.is_dir():
+            self.logger.debug(f"文件夹不存在，跳过去重: {trading_day}")
+            return
+        
+        csv_files = list(folder_path.glob("*.csv"))
+        if not csv_files:
+            self.logger.debug(f"文件夹为空，跳过去重: {trading_day}")
+            return
+        
+        self.logger.info(
+            f"开始去重和排序 {trading_day} 中的 {len(csv_files)} 个{data_type}文件..."
+        )
+        
+        success_count = 0
+        
+        # 使用对应存储实例的去重方法
+        storage = self.tick_storage if data_type == "Tick" else self.kline_storage
+        
+        for csv_file in csv_files:
+            if storage.deduplicate_and_sort_file(csv_file):
+                success_count += 1
+        
+        self.logger.info(
+            f"✓ 去重完成: {trading_day} "
+            f"({success_count}/{len(csv_files)} 个{data_type}文件处理成功)"
+        )
     
     def _get_folders_to_compress(self) -> list[str]:
         """

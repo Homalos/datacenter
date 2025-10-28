@@ -32,6 +32,7 @@ from src.core.alarm_scheduler import AlarmScheduler, create_default_tasks
 from src.core.metrics_collector import MetricsCollector
 from src.core.trading_day_manager import TradingDayManager
 from src.gateway.market_gateway import MarketGateway
+from src.gateway.trader_gateway import TraderGateway
 from src.system_config import DatacenterConfig
 from src.utils.common import load_broker_config
 from src.utils.log import get_logger
@@ -100,6 +101,7 @@ class DataCenterService:
         self.event_bus: Optional[EventBus] = None
         self.trading_day_manager: Optional[TradingDayManager] = None
         self.market_gateway: Optional[MarketGateway] = None
+        self.trader_gateway: Optional[TraderGateway] = None
         self.hybrid_storage: Optional[HybridStorage] = None
         self.contract_manager: Optional[ContractManager] = None
         self.bar_manager: Optional[BarManager] = None
@@ -271,7 +273,8 @@ class DataCenterService:
                 parquet_tick_path="data/ticks",  # Tick数据存储路径
                 parquet_kline_path="data/klines",  # K线数据存储路径
                 retention_days=7,
-                batch_size=100,  # 每100条 tick 批量写入一次
+                flush_interval=60,  # 每60秒刷新一次缓冲区（定时触发）
+                max_buffer_size=10000,  # 缓冲区上限10000条（安全阀）
                 trading_day_manager=self.trading_day_manager  # 传入交易日管理器
             )
             self.starter.register_module(
@@ -368,7 +371,80 @@ class DataCenterService:
             )
             self._update_module_status("MarketGateway", "registered")
             
-            # 6. 创建合约管理器
+            # 6. 启动交易网关（用于获取trading_day）
+            self._add_log("INFO", "初始化交易网关...")
+            self.trader_gateway = TraderGateway(event_bus=self.event_bus)
+            
+            def start_trader_gateway(gateway):
+                """启动交易网关并登录（用于获取trading_day）"""
+                try:
+                    broker_config = load_broker_config()
+                    if not broker_config:
+                        self._add_log("WARNING", "未找到交易网关配置，跳过启动")
+                        return
+                    
+                    broker_name = broker_config.get("broker_name", "未知")
+                    config = broker_config.get("config")
+                    
+                    # 创建登录完成事件
+                    login_event = threading.Event()
+                    login_success = [False]
+                    
+                    def on_td_login(event: Event):
+                        """监听 TD_GATEWAY_LOGIN 事件"""
+                        payload = event.payload or {}
+                        if payload.get("code") == 0:
+                            # 登录成功
+                            trading_day = payload.get("data", {}).get("TradingDay", "未知")
+                            self._add_log("INFO", f"✓ 交易网关 {broker_name} 登录成功，交易日: {trading_day}")
+                            login_success[0] = True
+                        else:
+                            # 登录失败
+                            error_msg = payload.get("message", "未知错误")
+                            self._add_log("WARNING", f"✗ 交易网关 {broker_name} 登录失败: {error_msg}")
+                        
+                        # 设置事件，结束等待
+                        login_event.set()
+                    
+                    # 订阅登录事件
+                    self.event_bus.subscribe(EventType.TD_GATEWAY_LOGIN, on_td_login)
+                    
+                    try:
+                        self._add_log("INFO", f"连接交易网关: {broker_name}...")
+                        gateway.connect(config)
+                        
+                        # 等待登录完成
+                        max_wait = 10
+                        if login_event.wait(timeout=max_wait):
+                            if login_success[0]:
+                                # 登录成功，TradingDayManager已接收到trading_day
+                                self._add_log("INFO", "✓ 交易网关已就绪，trading_day已更新")
+                                time.sleep(0.5)  # 短暂等待，确保其他订阅者处理完毕
+                            else:
+                                # 登录失败，使用系统日期作为fallback
+                                self._add_log("WARNING", "交易网关登录失败，将使用系统日期作为trading_day")
+                        else:
+                            # 超时
+                            self._add_log("WARNING", f"交易网关登录超时（{max_wait}秒），将使用系统日期")
+                    
+                    finally:
+                        # 清理：取消订阅
+                        self.event_bus.unsubscribe(EventType.TD_GATEWAY_LOGIN, on_td_login)
+                
+                except Exception as e:
+                    self._add_log("WARNING", f"交易网关启动失败: {e}，将使用系统日期")
+                    # 不抛出异常，允许系统继续运行（使用系统日期作为fallback）
+            
+            self.starter.register_module(
+                name="TraderGateway",
+                instance=self.trader_gateway,
+                dependencies=["EventBus"],
+                start_func=start_trader_gateway,
+                required=False  # 标记为非必需，失败不影响行情网关
+            )
+            self._update_module_status("TraderGateway", "registered")
+            
+            # 7. 创建合约管理器
             self._add_log("INFO", "初始化合约管理器...")
             self.contract_manager = ContractManager(
                 event_bus=self.event_bus,
@@ -484,6 +560,18 @@ class DataCenterService:
     def _stop_internal(self):
         """内部停止逻辑"""
         try:
+            # 优先刷新 HybridStorage 缓冲区（防止数据丢失）
+            if self.hybrid_storage:
+                self._add_log("INFO", "正在刷新 HybridStorage 缓冲区...")
+                self.hybrid_storage.stop()
+                self._add_log("INFO", "✓ HybridStorage 缓冲区已刷新")
+            
+            # 停止 SQLiteStorage 写入队列
+            if hasattr(self, 'sqlite_storage') and self.sqlite_storage:
+                self._add_log("INFO", "正在停止 SQLiteStorage 写入队列...")
+                self.sqlite_storage.stop()
+                self._add_log("INFO", "✓ SQLiteStorage 已停止")
+            
             if self.starter:
                 self._add_log("INFO", "停止所有模块...")
                 # DataCenterStarter 会自动处理优雅关闭
@@ -502,6 +590,8 @@ class DataCenterService:
             self.starter = None
             self.event_bus = None
             self.market_gateway = None
+            self.trader_gateway = None
+            self.hybrid_storage = None
             
         except Exception as e:
             self.logger.error(f"停止数据中心异常: {e}", exc_info=True)

@@ -12,10 +12,13 @@
 import os
 import duckdb
 import pandas as pd  # type: ignore
+import threading
+import tarfile
+import shutil
 from config import settings
 from pathlib import Path
 from datetime import datetime
-from typing import Optional
+from typing import Optional, Dict
 
 from src.core.trading_day_manager import TradingDayManager
 from src.utils.log import get_logger
@@ -45,6 +48,27 @@ class DataStorage:
         self.trading_day_manager = trading_day_manager
         self.logger = get_logger(self.__class__.__name__)
         self.compressed_folders: set[str] = set()  # 记录已压缩的文件夹
+        
+        # 文件锁字典：每个文件一把锁（防止并发写入冲突）
+        self._file_locks: Dict[str, threading.Lock] = {}
+        self._locks_lock = threading.Lock()  # 保护file_locks字典本身的锁
+    
+    def _get_file_lock(self, file_path: Path) -> threading.Lock:
+        """
+        获取指定文件的锁（如果不存在则创建）
+        
+        Args:
+            file_path: 文件路径
+            
+        Returns:
+            该文件的锁对象
+        """
+        file_key = str(file_path.resolve())  # 使用绝对路径作为key
+        
+        with self._locks_lock:
+            if file_key not in self._file_locks:
+                self._file_locks[file_key] = threading.Lock()
+            return self._file_locks[file_key]
 
     def _get_file_path(self, symbol: str, date: Optional[str] = None) -> Path:
         """
@@ -72,7 +96,7 @@ class DataStorage:
 
     def save_ticks(self, symbol: str, df: pd.DataFrame, date: Optional[str] = None):
         """
-        保存 Tick 数据到CSV格式（未压缩，高性能写入）
+        保存 Tick 数据到CSV格式（追加写入，高性能）
         
         Args:
             symbol: 合约代码
@@ -80,8 +104,9 @@ class DataStorage:
             date: 日期（YYYYMMDD），默认今天
             
         Note:
-            - 交易时间：写入未压缩CSV，追求性能
-            - 非交易时间：通过compress_trading_day_folder统一压缩
+            - 使用追加写入模式（mode='a'）
+            - 通过文件锁防止并发冲突
+            - 不进行去重和排序（定期批量处理）
         """
         if df.empty:
             self.logger.warning(f"尝试保存空DataFrame [{symbol}]，已跳过")
@@ -89,65 +114,41 @@ class DataStorage:
             
         file_path = self._get_file_path(symbol, date)
         
-        # 清理空文件
-        if file_path.exists() and file_path.stat().st_size == 0:
-            self.logger.warning(f"检测到空文件 {file_path}，删除后重新写入")
-            file_path.unlink()
+        # 获取文件锁（防止并发写入冲突）
+        file_lock = self._get_file_lock(file_path)
         
-        # 检查文件是否存在且不为空
-        if file_path.exists() and file_path.stat().st_size > 0:
+        with file_lock:
             try:
-                # 读取已有数据并合并
-                existing = pd.read_csv(file_path)
+                # 检查文件是否存在（决定是否写入表头）
+                file_exists = file_path.exists() and file_path.stat().st_size > 0
                 
-                # 统一datetime类型
-                if 'datetime' in existing.columns:
-                    existing['datetime'] = pd.to_datetime(existing['datetime'])
-                if 'datetime' in df.columns:
-                    df['datetime'] = pd.to_datetime(df['datetime'])
+                # 追加写入（原子操作，无需临时文件）
+                df.to_csv(
+                    file_path,
+                    mode='a',           # 追加模式
+                    header=not file_exists,  # 文件不存在时写表头
+                    index=False
+                )
                 
-                df = pd.concat([existing, df], ignore_index=True)
-                # 去重
-                if 'datetime' in df.columns:
-                    df = df.drop_duplicates(subset=['datetime'], keep='last')
-                    df = df.sort_values('datetime').reset_index(drop=True)
+                self.logger.debug(f"✓ 成功追加 {len(df)} 条Tick到 {file_path.name}")
+                
             except Exception as e:
-                self.logger.error(f"读取已有tick数据失败 [{symbol}]: {e}，将覆盖写入")
-                # 备份损坏的文件
-                if file_path.exists():
-                    backup_path = file_path.parent / f"{file_path.stem}.corrupted.csv"
-                    try:
-                        file_path.rename(backup_path)
-                        self.logger.warning(f"已将损坏文件重命名为: {backup_path.name}")
-                    except Exception as rename_error:
-                        self.logger.error(f"重命名损坏文件失败: {rename_error}，将直接覆盖")
-        
-        # 原子写入：先写临时文件，再重命名
-        temp_path = file_path.parent / f"{file_path.stem}.tmp.csv"
-        try:
-            # 写入未压缩CSV（高性能）
-            df.to_csv(temp_path, index=False)
-            # 原子重命名
-            temp_path.replace(file_path)
-            self.logger.debug(f"✓ 成功保存 {len(df)} 条Tick到 {file_path.name}")
-        except Exception as e:
-            self.logger.error(f"写入Tick数据失败 [{symbol}]: {e}")
-            if temp_path.exists():
-                temp_path.unlink()
-            raise
+                self.logger.error(f"追加写入Tick数据失败 [{symbol}]: {e}", exc_info=True)
+                raise
 
     def save_kline(self, symbol: str, df: pd.DataFrame, date: Optional[str] = None):
         """
-        保存 K线 数据到CSV格式（未压缩，高性能写入）
+        保存 K线 数据到CSV格式（追加写入，高性能）
         
         Args:
-            symbol: 合约代码
+            symbol: 合约代码（含周期，如 a2511_1m）
             df: 数据DataFrame
             date: 日期（YYYYMMDD），默认今天
             
         Note:
-            - 交易时间：写入未压缩CSV，追求性能
-            - 非交易时间：通过compress_trading_day_folder统一压缩
+            - 使用追加写入模式（mode='a'）
+            - 通过文件锁防止并发冲突
+            - 不进行去重和排序（定期批量处理）
         """
         if df.empty:
             self.logger.warning(f"尝试保存空DataFrame [{symbol}]，已跳过")
@@ -155,50 +156,91 @@ class DataStorage:
             
         file_path = self._get_file_path(symbol, date)
         
-        # 清理空文件
-        if file_path.exists() and file_path.stat().st_size == 0:
-            self.logger.warning(f"检测到空文件 {file_path}，删除后重新写入")
-            file_path.unlink()
+        # 获取文件锁（防止并发写入冲突）
+        file_lock = self._get_file_lock(file_path)
         
-        # 检查文件是否存在且不为空
-        if file_path.exists() and file_path.stat().st_size > 0:
+        with file_lock:
             try:
-                # 读取已有数据并合并
-                existing = pd.read_csv(file_path)
+                # 检查文件是否存在（决定是否写入表头）
+                file_exists = file_path.exists() and file_path.stat().st_size > 0
                 
-                # 统一datetime类型
-                if 'datetime' in existing.columns:
-                    existing['datetime'] = pd.to_datetime(existing['datetime'])
+                # 追加写入（原子操作，无需临时文件）
+                df.to_csv(
+                    file_path,
+                    mode='a',           # 追加模式
+                    header=not file_exists,  # 文件不存在时写表头
+                    index=False
+                )
+                
+                self.logger.debug(f"✓ 成功追加 {len(df)} 条K线到 {file_path.name}")
+                
+            except Exception as e:
+                self.logger.error(f"追加写入K线数据失败 [{symbol}]: {e}", exc_info=True)
+                raise
+    
+    def deduplicate_and_sort_file(self, file_path: Path) -> bool:
+        """
+        去重并排序指定的CSV文件
+        
+        Args:
+            file_path: CSV文件路径
+            
+        Returns:
+            是否成功
+            
+        Note:
+            - 在非交易时间调用
+            - 去重规则：同一datetime保留最后一条
+            - 按datetime升序排序
+        """
+        if not file_path.exists() or file_path.stat().st_size == 0:
+            return True
+        
+        file_lock = self._get_file_lock(file_path)
+        
+        with file_lock:
+            temp_path = None
+            try:
+                self.logger.info(f"开始去重和排序: {file_path.name}")
+                
+                # 读取数据
+                df = pd.read_csv(file_path)
+                original_count = len(df)
+                
+                # 转换datetime类型
                 if 'datetime' in df.columns:
                     df['datetime'] = pd.to_datetime(df['datetime'])
                 
-                df = pd.concat([existing, df], ignore_index=True)
-                # 去重
+                # 去重（保留最后一条）
                 if 'datetime' in df.columns:
                     df = df.drop_duplicates(subset=['datetime'], keep='last')
+                    
+                # 排序
+                if 'datetime' in df.columns:
                     df = df.sort_values('datetime').reset_index(drop=True)
+                
+                duplicates = original_count - len(df)
+                
+                # 原子写入：先写临时文件，再替换
+                temp_path = file_path.parent / f"{file_path.stem}.dedup.tmp.csv"
+                df.to_csv(temp_path, index=False)
+                temp_path.replace(file_path)
+                
+                if duplicates > 0:
+                    self.logger.info(
+                        f"✓ 去重完成: {file_path.name} "
+                        f"({original_count} → {len(df)}条, 去除{duplicates}条重复)"
+                    )
+                else:
+                    self.logger.debug(f"✓ 无重复数据: {file_path.name}")
+                
+                return True
+                
             except Exception as e:
-                self.logger.error(f"读取已有kline数据失败 [{symbol}]: {e}，将覆盖写入")
-                # 备份损坏的文件
-                if file_path.exists():
-                    backup_path = file_path.parent / f"{file_path.stem}.corrupted.csv"
-                    try:
-                        file_path.rename(backup_path)
-                        self.logger.warning(f"已将损坏文件重命名为: {backup_path.name}")
-                    except Exception as rename_error:
-                        self.logger.error(f"重命名损坏文件失败: {rename_error}，将直接覆盖")
-        
-        # 原子写入
-        temp_path = file_path.parent / f"{file_path.stem}.tmp.csv"
-        try:
-            df.to_csv(temp_path, index=False)
-            temp_path.replace(file_path)
-            self.logger.debug(f"✓ 成功保存 {len(df)} 条K线到 {file_path.name}")
-        except Exception as e:
-            self.logger.error(f"写入K线数据失败 [{symbol}]: {e}")
-            if temp_path.exists():
-                temp_path.unlink()
-            raise
+                self.logger.error(f"去重失败 [{file_path.name}]: {e}", exc_info=True)
+                if temp_path and temp_path.exists():
+                    temp_path.unlink()
+                return False
 
     def load_ticks(self, symbol: str, start_date: Optional[str] = None, end_date: Optional[str] = None) -> pd.DataFrame:
         """
@@ -375,9 +417,6 @@ class DataStorage:
             - 压缩整个文件夹为 {trading_day}.tar.gz
             - 压缩成功后删除原文件夹
         """
-        import tarfile
-        import shutil
-        
         folder_path = Path(self.base_path) / trading_day
         
         # 检查文件夹是否存在
@@ -449,8 +488,6 @@ class DataStorage:
         Returns:
             是否解压成功
         """
-        import tarfile
-        
         archive_path = Path(self.base_path) / f"{trading_day}.tar.gz"
         folder_path = Path(self.base_path) / trading_day
         
