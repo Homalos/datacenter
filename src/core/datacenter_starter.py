@@ -237,6 +237,18 @@ class DataCenterStarter:
         
         self.startup_order = result
     
+    def stop(self) -> None:
+        """
+        停止数据中心（公开接口）
+        
+        优雅地停止所有已启动的模块，按启动顺序的逆序执行
+        """
+        if not self.running:
+            self.logger.warning("数据中心未在运行，无需停止")
+            return
+        
+        self._shutdown()
+    
     def _shutdown(self) -> None:
         """关闭数据中心（按启动顺序的逆序）"""
         self.logger.info("=" * 60)
