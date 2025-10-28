@@ -599,12 +599,18 @@ class DataCenterService:
                 self.sqlite_storage.stop()
                 self._add_log("INFO", "✓ SQLiteStorage 已停止")
             
+            # 停止所有模块（按启动顺序的逆序）
             if self.starter:
                 self._add_log("INFO", "停止所有模块...")
-                # DataCenterStarter 会自动处理优雅关闭
-                # 这里可以等待启动线程结束
-                if self._start_thread and self._start_thread.is_alive():
-                    self._start_thread.join(timeout=5)
+                self.starter.stop()
+                self._add_log("INFO", "✓ 所有模块已停止")
+            
+            # 等待启动线程结束
+            if self._start_thread and self._start_thread.is_alive():
+                self._add_log("INFO", "等待启动线程结束...")
+                self._start_thread.join(timeout=5)
+                if self._start_thread.is_alive():
+                    self._add_log("WARNING", "启动线程未在超时时间内结束")
             
             self._add_log("INFO", "✓ 数据中心已停止")
             self._update_state(
