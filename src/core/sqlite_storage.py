@@ -108,6 +108,80 @@ class SQLiteStorage:
         # data/db/tick/20251027/SA601.db
         return day_dir / f"{instrument_id}.db"
     
+    def _get_trading_days_between(self, data_type: str, start_time: str, end_time: str) -> list[str]:
+        """
+        枚举时间范围内的所有交易日目录
+        
+        Args:
+            data_type: 数据类型（'tick' 或 'kline'）
+            start_time: 开始时间（ISO格式，如 '2025-10-27 14:00:00'）
+            end_time: 结束时间（ISO格式，如 '2025-10-28 16:00:00'）
+        
+        Returns:
+            交易日列表（YYYYMMDD格式，升序排列）
+        
+        Note:
+            扫描实际存在的交易日目录，而不是计算理论日期范围
+        """
+        try:
+            # 确定数据库根目录
+            if data_type == "tick":
+                root = self.tick_db_root
+            elif data_type == "kline":
+                root = self.kline_db_root
+            else:
+                return []
+            
+            # 扫描所有交易日目录（格式：YYYYMMDD）
+            trading_days = []
+            if root.exists():
+                for day_dir in root.iterdir():
+                    if day_dir.is_dir() and day_dir.name.isdigit() and len(day_dir.name) == 8:
+                        trading_days.append(day_dir.name)
+            
+            # 按日期排序
+            trading_days.sort()
+            
+            # 过滤：只保留时间范围内的交易日
+            from datetime import datetime, timedelta
+            
+            try:
+                # 提取日期部分（YYYY-MM-DD 格式）
+                start_date_str = start_time.split()[0] if ' ' in start_time else start_time[:10]
+                end_date_str = end_time.split()[0] if ' ' in end_time else end_time[:10]
+                
+                # 解析为 datetime 对象
+                start_date = datetime.fromisoformat(start_date_str)
+                end_date = datetime.fromisoformat(end_date_str)
+            except Exception as e:
+                # 如果时间解析失败，返回所有交易日（安全回退）
+                self.logger.warning(f"时间解析失败: {e}，返回所有交易日")
+                return trading_days
+            
+            # 过滤交易日（宽松策略：前后各多查1天，防止夜盘数据遗漏）
+            filtered_days = []
+            for day_str in trading_days:
+                try:
+                    # 将交易日字符串（YYYYMMDD）转换为 datetime
+                    day_date = datetime.strptime(day_str, "%Y%m%d")
+                    
+                    # 计算日期范围（宽松：start_date - 1天 到 end_date + 1天）
+                    # 这样可以覆盖夜盘数据（夜盘属于下一交易日）
+                    range_start = start_date - timedelta(days=1)
+                    range_end = end_date + timedelta(days=1)
+                    
+                    if range_start <= day_date <= range_end:
+                        filtered_days.append(day_str)
+                except Exception as e:
+                    self.logger.debug(f"解析交易日失败 {day_str}: {e}")
+                    continue
+            
+            return filtered_days
+        
+        except Exception as e:
+            self.logger.warning(f"枚举交易日目录失败: {e}，返回空列表")
+            return []
+    
     def _init_tick_table(self, conn) -> None:
         """
         初始化Tick表结构（45个字段，PascalCase命名）
@@ -558,7 +632,7 @@ class SQLiteStorage:
                     start_time: str,
                     end_time: str) -> pd.DataFrame:
         """
-        查询Tick数据（使用Timestamp字段，PascalCase命名）
+        查询Tick数据（支持分库查询，按交易日+合约存储）
         
         Args:
             instrument_id: 合约代码
@@ -567,23 +641,65 @@ class SQLiteStorage:
         
         Returns:
             Tick数据DataFrame（45个字段，PascalCase命名）
+        
+        Note:
+            使用 Timestamp 字段进行精确时间范围过滤，
+            自动遍历多个交易日的数据库文件
         """
+        all_results = []
+        
         try:
-            with self._get_conn(self.tick_db_file) as conn:
-                query = """
-                    SELECT * FROM ticks
-                    WHERE InstrumentID = ?
-                    AND Timestamp >= ?
-                    AND Timestamp <= ?
-                    ORDER BY Timestamp
-                """
-                df = pd.read_sql_query(
-                    query, 
-                    conn, 
-                    params=(instrument_id, start_time, end_time)
-                )
-                self.logger.debug(f"查询到 {len(df)} 条Tick数据")
-                return df
+            # 1. 枚举涉及的交易日目录
+            trading_days = self._get_trading_days_between("tick", start_time, end_time)
+            
+            if not trading_days:
+                self.logger.debug(f"未找到 {instrument_id} 在 {start_time} ~ {end_time} 的交易日数据")
+                return pd.DataFrame()
+            
+            # 2. 遍历每个交易日的数据库文件
+            for trading_day in trading_days:
+                db_path = self._get_db_path("tick", instrument_id, trading_day)
+                
+                if not db_path.exists():
+                    self.logger.debug(f"Tick数据库不存在: {db_path}")
+                    continue
+                
+                try:
+                    # 3. 查询该数据库
+                    with self._get_conn(db_path) as conn:
+                        query = """
+                            SELECT * FROM ticks
+                            WHERE InstrumentID = ?
+                            AND Timestamp >= ?
+                            AND Timestamp <= ?
+                            ORDER BY Timestamp
+                        """
+                        df = pd.read_sql_query(
+                            query, 
+                            conn, 
+                            params=(instrument_id, start_time, end_time)
+                        )
+                        
+                        if not df.empty:
+                            all_results.append(df)
+                            self.logger.debug(
+                                f"✓ 从 {trading_day}/{instrument_id}.db 查询到 {len(df)} 条Tick"
+                            )
+                
+                except Exception as e:
+                    self.logger.warning(f"查询Tick数据库失败 [{trading_day}/{instrument_id}.db]: {e}")
+                    continue
+            
+            # 4. 合并所有结果
+            if all_results:
+                merged_df = pd.concat(all_results, ignore_index=True)
+                # 按时间排序（确保跨交易日数据有序）
+                merged_df = merged_df.sort_values('Timestamp').reset_index(drop=True)
+                self.logger.debug(f"查询到 {len(merged_df)} 条Tick数据（合并自 {len(all_results)} 个交易日）")
+                return merged_df
+            
+            self.logger.debug(f"未查询到Tick数据: {instrument_id} {start_time} ~ {end_time}")
+            return pd.DataFrame()
         
         except Exception as e:
             self.logger.error(f"查询Tick数据失败: {e}", exc_info=True)
@@ -595,7 +711,7 @@ class SQLiteStorage:
                      start_time: str,
                      end_time: str) -> pd.DataFrame:
         """
-        查询K线数据（使用Timestamp字段进行精确时间范围查询）
+        查询K线数据（支持分库查询，按交易日+合约存储）
         
         Args:
             instrument_id: 合约代码
@@ -608,25 +724,63 @@ class SQLiteStorage:
         
         Note:
             使用 Timestamp 字段（完整datetime）进行时间范围过滤，
-            支持精确的跨天查询，查询性能已通过索引优化
+            支持精确的跨天查询，自动遍历多个交易日的数据库文件
         """
+        all_results = []
+        
         try:
-            with self._get_conn(self.kline_db_file) as conn:
-                query = """
-                    SELECT * FROM klines
-                    WHERE InstrumentID = ?
-                    AND BarType = ?
-                    AND Timestamp >= ?
-                    AND Timestamp <= ?
-                    ORDER BY Timestamp
-                """
-                df = pd.read_sql_query(
-                    query, 
-                    conn, 
-                    params=(instrument_id, interval, start_time, end_time)
-                )
-                self.logger.debug(f"查询到 {len(df)} 条K线数据")
-                return df
+            # 1. 枚举涉及的交易日目录
+            trading_days = self._get_trading_days_between("kline", start_time, end_time)
+            
+            if not trading_days:
+                self.logger.debug(f"未找到 {instrument_id} 在 {start_time} ~ {end_time} 的交易日数据")
+                return pd.DataFrame()
+            
+            # 2. 遍历每个交易日的数据库文件
+            for trading_day in trading_days:
+                db_path = self._get_db_path("kline", instrument_id, trading_day)
+                
+                if not db_path.exists():
+                    self.logger.debug(f"K线数据库不存在: {db_path}")
+                    continue
+                
+                try:
+                    # 3. 查询该数据库
+                    with self._get_conn(db_path) as conn:
+                        query = """
+                            SELECT * FROM klines
+                            WHERE InstrumentID = ?
+                            AND BarType = ?
+                            AND Timestamp >= ?
+                            AND Timestamp <= ?
+                            ORDER BY Timestamp
+                        """
+                        df = pd.read_sql_query(
+                            query, 
+                            conn, 
+                            params=(instrument_id, interval, start_time, end_time)
+                        )
+                        
+                        if not df.empty:
+                            all_results.append(df)
+                            self.logger.debug(
+                                f"✓ 从 {trading_day}/{instrument_id}.db 查询到 {len(df)} 条K线"
+                            )
+                
+                except Exception as e:
+                    self.logger.warning(f"查询K线数据库失败 [{trading_day}/{instrument_id}.db]: {e}")
+                    continue
+            
+            # 4. 合并所有结果
+            if all_results:
+                merged_df = pd.concat(all_results, ignore_index=True)
+                # 按时间排序（确保跨交易日数据有序）
+                merged_df = merged_df.sort_values('Timestamp').reset_index(drop=True)
+                self.logger.debug(f"查询到 {len(merged_df)} 条K线数据（合并自 {len(all_results)} 个交易日）")
+                return merged_df
+            
+            self.logger.debug(f"未查询到K线数据: {instrument_id} ({interval}) {start_time} ~ {end_time}")
+            return pd.DataFrame()
         
         except Exception as e:
             self.logger.error(f"查询K线数据失败: {e}", exc_info=True)
