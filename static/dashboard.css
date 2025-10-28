@@ -295,6 +295,21 @@ button:disabled {
 .module-registered { background: linear-gradient(135deg, #60a5fa 0%, #3b82f6 100%); color: white; }
 
 /* ========================================
+   日志控制
+   ======================================== */
+
+.log-controls {
+    display: flex;
+    gap: 12px;
+    margin-bottom: 15px;
+    flex-wrap: wrap;
+}
+
+.log-controls button {
+    flex: 0 0 auto;
+}
+
+/* ========================================
    日志容器
    ======================================== */
 
@@ -307,7 +322,7 @@ button:disabled {
     font-size: 0.9em;
     max-height: 500px;
     overflow-y: auto;
-    margin-top: 15px;
+    margin-top: 0;
     box-shadow: inset 0 2px 8px rgba(0,0,0,0.2);
     border: 1px solid #334155;
 }
@@ -567,6 +582,15 @@ body.dark-mode .theme-toggle:hover {
     }
     
     .control-buttons button {
+        width: 100%;
+        justify-content: center;
+    }
+    
+    .log-controls {
+        flex-direction: column;
+    }
+    
+    .log-controls button {
         width: 100%;
         justify-content: center;
     }
