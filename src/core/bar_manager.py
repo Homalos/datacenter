@@ -92,12 +92,21 @@ class BarManager:
         Args:
             instrument_id: 合约代码
         """
+        # 创建生成器前统计当前数量
+        current_count = len(self.generators)
+        
+        # 创建多周期K线生成器
         self.generators[instrument_id] = MultiBarGenerator(
             intervals=self.intervals,
             on_bar=self._on_bar_generated
         )
         
-        self.logger.debug(f"为合约 {instrument_id} 创建K线生成器")
+        # 打印详细进度（使用INFO级别，便于在Web界面显示）
+        self.logger.info(
+            f"✓ 已为合约 [{instrument_id}] 创建多周期K线合成器 "
+            f"(第 {current_count + 1} 个合约) | "
+            f"支持周期: {', '.join(self.intervals)}"
+        )
     
     def _on_bar_generated(self, bar: BarData, interval: str) -> None:
         """

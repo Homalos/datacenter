@@ -434,9 +434,9 @@ class HybridStorage:
             
             # 2. 保存到CSV归档（冷数据，按交易日统一保存）
             # 不传date参数，使用trading_day_manager的交易日
-            if "instrument_id" in df.columns:
+            if "InstrumentID" in df.columns:
                 parquet_count = 0
-                for instrument_id, group in df.groupby("instrument_id"):
+                for instrument_id, group in df.groupby("InstrumentID"):
                     self.parquet_tick_storage.save_ticks(
                         symbol=str(instrument_id),
                         df=group,

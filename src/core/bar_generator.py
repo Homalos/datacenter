@@ -40,7 +40,7 @@ class BarGenerator:
         """
         self.interval = interval
         self.on_bar = on_bar
-        self.logger = get_logger(f"{self.__class__.__name__}[{interval}]")
+        self.logger = get_logger(f"{self.__class__.__name__}")
         
         # 当前正在生成的K线
         self.current_bar: Optional[BarData] = None
@@ -50,9 +50,9 @@ class BarGenerator:
         
         # 解析周期参数
         self.interval_minutes = self._parse_interval(interval)
-        
+
         self.logger.debug(f"K线合成器初始化完成，周期: {interval}")
-    
+
     def update_tick(self, tick: TickData) -> None:
         """
         更新Tick数据，生成K线
