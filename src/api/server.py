@@ -144,24 +144,33 @@ def get_kline(
     Returns:
         K线数据列表
     """
-    if not storage:
-        raise HTTPException(status_code=503, detail="存储服务未初始化")
+    # 优先使用 datacenter_service 的 storage（新架构）
+    active_storage = None
+    if datacenter_service.is_running():
+        active_storage = datacenter_service.hybrid_storage
+    else:
+        # Fallback：使用全局变量（兼容旧启动方式）
+        active_storage = storage
+    
+    if not active_storage:
+        raise HTTPException(status_code=503, detail="存储服务未初始化或数据中心未运行")
     
     try:
         # 记录API请求（用于监控）
-        if metrics_collector:
-            metrics_collector.record_api_request()
+        active_metrics = datacenter_service.metrics_collector if datacenter_service.is_running() else metrics_collector
+        if active_metrics:
+            active_metrics.record_api_request()
         
         # 查询K线数据
         symbol_with_interval = f"{symbol}_{interval}"
         
         # 判断storage类型，使用相应的查询方法
-        if hasattr(storage, 'query_klines'):
+        if hasattr(active_storage, 'query_klines'):
             # HybridStorage接口
-            df = storage.query_klines(symbol, interval, start, end)
+            df = active_storage.query_klines(symbol, interval, start, end)
         else:
             # 旧的DataStorage接口
-            df = storage.query_kline(symbol_with_interval, start, end)
+            df = active_storage.query_kline(symbol_with_interval, start, end)
         
         if df.empty:
             return {
@@ -216,21 +225,30 @@ def get_tick(
     Returns:
         Tick数据列表
     """
-    if not storage:
-        raise HTTPException(status_code=503, detail="存储服务未初始化")
+    # 优先使用 datacenter_service 的 storage（新架构）
+    active_storage = None
+    if datacenter_service.is_running():
+        active_storage = datacenter_service.hybrid_storage
+    else:
+        # Fallback：使用全局变量（兼容旧启动方式）
+        active_storage = storage
+    
+    if not active_storage:
+        raise HTTPException(status_code=503, detail="存储服务未初始化或数据中心未运行")
     
     try:
         # 记录API请求
-        if metrics_collector:
-            metrics_collector.record_api_request()
+        active_metrics = datacenter_service.metrics_collector if datacenter_service.is_running() else metrics_collector
+        if active_metrics:
+            active_metrics.record_api_request()
         
         # 查询Tick数据
-        if hasattr(storage, 'query_ticks'):
+        if hasattr(active_storage, 'query_ticks'):
             # HybridStorage接口
-            df = storage.query_ticks(symbol, start, end)
+            df = active_storage.query_ticks(symbol, start, end)
         else:
             # 旧的DataStorage接口
-            df = storage.query_tick(symbol, start, end)
+            df = active_storage.query_tick(symbol, start, end)
         
         if df.empty:
             return {
@@ -283,16 +301,24 @@ def get_contracts(
     Returns:
         合约列表
     """
-    if not contract_manager:
-        raise HTTPException(status_code=503, detail="合约管理服务未初始化")
+    # 优先使用 datacenter_service 的 contract_manager（新架构）
+    active_contract_manager = None
+    if datacenter_service.is_running():
+        active_contract_manager = datacenter_service.contract_manager
+    else:
+        # Fallback：使用全局变量（兼容旧启动方式）
+        active_contract_manager = contract_manager
+    
+    if not active_contract_manager:
+        raise HTTPException(status_code=503, detail="合约管理服务未初始化或数据中心未运行")
     
     try:
         if exchange:
             # 按交易所筛选
-            contracts = contract_manager.get_contracts_by_exchange(exchange)
+            contracts = active_contract_manager.get_contracts_by_exchange(exchange)
         else:
             # 返回全部合约
-            contracts = contract_manager.get_all_contracts()
+            contracts = active_contract_manager.get_all_contracts()
         
         return {
             "total": len(contracts),
@@ -319,25 +345,43 @@ def get_system_status():
     }
     
     try:
-        # 数据中心启动器状态
-        if datacenter_starter:
-            status["modules"] = datacenter_starter.get_statistics()
-        
-        # 合约管理器状态
-        if contract_manager:
-            status["contracts"] = contract_manager.get_statistics()
-        
-        # K线管理器状态
-        if bar_manager:
-            status["bars"] = bar_manager.get_statistics()
-        
-        # 存储层状态
-        if storage and hasattr(storage, 'get_statistics'):
-            status["storage"] = storage.get_statistics()
-        
-        # 归档器状态
-        if data_archiver:
-            status["archiver"] = data_archiver.get_statistics()
+        # 优先使用 datacenter_service（新架构）
+        if datacenter_service.is_running():
+            # 数据中心启动器状态
+            if datacenter_service.starter:
+                status["modules"] = datacenter_service.starter.get_statistics()
+            
+            # 合约管理器状态
+            if datacenter_service.contract_manager:
+                status["contracts"] = datacenter_service.contract_manager.get_statistics()
+            
+            # K线管理器状态
+            if datacenter_service.bar_manager:
+                status["bars"] = datacenter_service.bar_manager.get_statistics()
+            
+            # 存储层状态
+            if datacenter_service.hybrid_storage and hasattr(datacenter_service.hybrid_storage, 'get_statistics'):
+                status["storage"] = datacenter_service.hybrid_storage.get_statistics()
+            
+            # 归档器状态
+            if datacenter_service.data_archiver:
+                status["archiver"] = datacenter_service.data_archiver.get_statistics()
+        else:
+            # Fallback：使用全局变量（兼容旧启动方式）
+            if datacenter_starter:
+                status["modules"] = datacenter_starter.get_statistics()
+            
+            if contract_manager:
+                status["contracts"] = contract_manager.get_statistics()
+            
+            if bar_manager:
+                status["bars"] = bar_manager.get_statistics()
+            
+            if storage and hasattr(storage, 'get_statistics'):
+                status["storage"] = storage.get_statistics()
+            
+            if data_archiver:
+                status["archiver"] = data_archiver.get_statistics()
         
         return status
     
@@ -351,12 +395,20 @@ def get_system_status():
 @app.get("/metrics")
 def get_metrics():
     """获取系统监控指标"""
-    if not metrics_collector:
-        raise HTTPException(status_code=503, detail="监控服务未初始化")
+    # 优先使用 datacenter_service 的 metrics_collector（新架构）
+    active_metrics = None
+    if datacenter_service.is_running():
+        active_metrics = datacenter_service.metrics_collector
+    else:
+        # Fallback：使用全局变量（兼容旧启动方式）
+        active_metrics = metrics_collector
+    
+    if not active_metrics:
+        raise HTTPException(status_code=503, detail="监控服务未初始化或数据中心未运行")
     
     try:
         # 收集所有指标
-        metrics = metrics_collector.collect_all_metrics()
+        metrics = active_metrics.collect_all_metrics()
         
         return metrics
     
@@ -370,11 +422,19 @@ def get_metrics():
 @app.get("/metrics/summary")
 def get_metrics_summary():
     """获取监控指标摘要（简化版）"""
-    if not metrics_collector:
-        raise HTTPException(status_code=503, detail="监控服务未初始化")
+    # 优先使用 datacenter_service 的 metrics_collector（新架构）
+    active_metrics = None
+    if datacenter_service.is_running():
+        active_metrics = datacenter_service.metrics_collector
+    else:
+        # Fallback：使用全局变量（兼容旧启动方式）
+        active_metrics = metrics_collector
+    
+    if not active_metrics:
+        raise HTTPException(status_code=503, detail="监控服务未初始化或数据中心未运行")
     
     try:
-        summary = metrics_collector.get_summary()
+        summary = active_metrics.get_summary()
         return summary
     
     except Exception as e:
@@ -387,11 +447,19 @@ def get_metrics_summary():
 @app.post("/archive")
 def trigger_archive():
     """手动触发数据归档（管理员操作）"""
-    if not data_archiver:
-        raise HTTPException(status_code=503, detail="归档服务未初始化")
+    # 优先使用 datacenter_service 的 data_archiver（新架构）
+    active_archiver = None
+    if datacenter_service.is_running():
+        active_archiver = datacenter_service.data_archiver
+    else:
+        # Fallback：使用全局变量（兼容旧启动方式）
+        active_archiver = data_archiver
+    
+    if not active_archiver:
+        raise HTTPException(status_code=503, detail="归档服务未初始化或数据中心未运行")
     
     try:
-        result = data_archiver.archive_old_data()
+        result = active_archiver.archive_old_data()
         return result
     
     except Exception as e:
