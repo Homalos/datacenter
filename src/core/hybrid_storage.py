@@ -51,7 +51,7 @@ class HybridStorage:
                  flush_interval: int = 60,
                  max_buffer_size: int = 10000,
                  buffer_warning_threshold: float = 0.7,  # 警告阈值（70%）
-                 buffer_flush_threshold: float = 0.85,  # 提前刷新阈值（85%）
+                 buffer_flush_threshold: float = 0.8,  # 提前刷新阈值（85%）
                  trading_day_manager = None):
         """
         初始化混合存储
@@ -521,10 +521,13 @@ class HybridStorage:
             # 2. 查询近期数据（SQLite）
             if end_dt >= cutoff_dt:
                 sqlite_start = max(start_dt, cutoff_dt)
+                # 使用空格格式（SQLite兼容性更好）
+                sqlite_start_str = str(sqlite_start).replace('T', ' ')[:19]
+                end_dt_str = str(end_dt).replace('T', ' ')[:19]
                 df_sqlite = self.sqlite_storage.query_ticks(
                     instrument_id,
-                    sqlite_start.isoformat(),
-                    end_dt.isoformat()
+                    sqlite_start_str,
+                    end_dt_str
                 )
                 if not df_sqlite.empty:
                     results.append(df_sqlite)
@@ -536,7 +539,9 @@ class HybridStorage:
             # 3. 合并结果
             if results:
                 df = pd.concat(results, ignore_index=True)
-                df = df.sort_values("datetime")
+                # 使用 Timestamp 字段排序（PascalCase命名）
+                if 'Timestamp' in df.columns:
+                    df = df.sort_values("Timestamp")
                 return df
             
             return pd.DataFrame()
@@ -588,11 +593,14 @@ class HybridStorage:
             # 2. 查询近期数据（SQLite）
             if end_dt >= cutoff_dt:
                 sqlite_start = max(start_dt, cutoff_dt)
+                # 使用空格格式（SQLite兼容性更好）
+                sqlite_start_str = str(sqlite_start).replace('T', ' ')[:19]
+                end_dt_str = str(end_dt).replace('T', ' ')[:19]
                 df_sqlite = self.sqlite_storage.query_klines(
                     instrument_id,
                     interval,
-                    sqlite_start.isoformat(),
-                    end_dt.isoformat()
+                    sqlite_start_str,
+                    end_dt_str
                 )
                 if not df_sqlite.empty:
                     results.append(df_sqlite)
@@ -604,7 +612,9 @@ class HybridStorage:
             # 3. 合并结果
             if results:
                 df = pd.concat(results, ignore_index=True)
-                df = df.sort_values("datetime")
+                # 使用 Timestamp 字段排序（PascalCase命名）
+                if 'Timestamp' in df.columns:
+                    df = df.sort_values("Timestamp")
                 return df
             
             return pd.DataFrame()
