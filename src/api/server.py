@@ -9,6 +9,7 @@
 @Software   : PyCharm
 @Description: 数据中心API服务 (FastAPI) - 提供数据查询和系统管理接口 + Web控制面板
 """
+import json
 import traceback
 import asyncio
 from pathlib import Path
@@ -99,6 +100,13 @@ def root():
             }
         }
     }
+
+
+@app.get("/favicon.ico")
+def favicon():
+    """返回空响应，避免404警告"""
+    from fastapi.responses import Response
+    return Response(status_code=204)
 
 
 @app.get("/health")
@@ -614,7 +622,7 @@ async def stream_datacenter_logs(request: Request):
             for log in recent_logs:
                 yield {
                     "event": "log",
-                    "data": log
+                    "data": json.dumps(log, ensure_ascii=False)
                 }
             
             # 然后持续推送新日志
@@ -627,13 +635,13 @@ async def stream_datacenter_logs(request: Request):
                     log_entry = await asyncio.wait_for(log_queue.get(), timeout=1.0)
                     yield {
                         "event": "log",
-                        "data": log_entry
+                        "data": json.dumps(log_entry, ensure_ascii=False)
                     }
                 except asyncio.TimeoutError:
                     # 发送心跳
                     yield {
                         "event": "ping",
-                        "data": {"timestamp": datetime.now().isoformat()}
+                        "data": json.dumps({"timestamp": datetime.now().isoformat()}, ensure_ascii=False)
                     }
         
         finally:
@@ -641,6 +649,28 @@ async def stream_datacenter_logs(request: Request):
             datacenter_service.remove_log_callback(log_callback)
     
     return EventSourceResponse(event_generator())
+
+
+@app.post("/datacenter/test-log")
+async def test_log():
+    """
+    测试日志推送功能
+    
+    手动触发一条测试日志，用于验证日志流是否正常工作
+    """
+    import random
+    
+    test_messages = [
+        "🧪 这是一条测试日志",
+        "🎯 日志流功能测试中...",
+        "✅ 如果您能看到这条消息，说明日志流工作正常！",
+        "📡 测试消息已发送"
+    ]
+    
+    message = random.choice(test_messages)
+    datacenter_service._add_log("INFO", message)
+    
+    return {"code": 0, "message": "测试日志已发送", "data": {"message": message}}
 
 
 # ============================================================

@@ -137,42 +137,53 @@ function connectLogStream() {
         logEventSource.close();
     }
     
+    console.log('🔌 正在连接日志流: /datacenter/logs/stream');
     logEventSource = new EventSource('/datacenter/logs/stream');
     
+    // 连接成功
+    logEventSource.onopen = function() {
+        console.log('✅ 日志流连接成功');
+    };
+    
     logEventSource.addEventListener('log', function(event) {
+        console.log('📝 收到日志事件:', event.data);
         try {
             // 验证数据有效性
             if (!event.data || event.data.trim() === '') {
+                console.warn('⚠️ 收到空日志数据');
                 return;
             }
             
             const log = JSON.parse(event.data);
+            console.log('✅ 日志解析成功:', log);
             
             // 验证日志对象有效性
             if (log && typeof log === 'object') {
                 appendLog(log);
+            } else {
+                console.warn('⚠️ 日志对象格式无效:', log);
             }
         } catch (error) {
-            // 静默处理 JSON 解析错误，避免控制台报错影响用户体验
-            console.debug('跳过无效日志数据:', event.data, error.message);
+            // 解析错误时显示详细信息
+            console.error('❌ 日志解析失败:', error, '原始数据:', event.data);
         }
     });
     
     logEventSource.addEventListener('ping', function(event) {
-        // 心跳，忽略
-        // 可选：验证心跳数据
+        // 心跳，显示调试信息
         try {
             if (event.data) {
                 const ping = JSON.parse(event.data);
-                console.debug('收到心跳:', ping);
+                console.debug('💓 收到心跳:', ping);
             }
         } catch (error) {
-            // 忽略心跳解析错误
+            console.debug('⚠️ 心跳解析失败:', error);
         }
     });
     
     logEventSource.onerror = function(error) {
-        console.error('日志流连接错误:', error);
+        console.error('❌ 日志流连接错误:', error);
+        console.log('🔄 将在5秒后重连...');
         // 5秒后重连
         setTimeout(connectLogStream, 5000);
     };
@@ -183,7 +194,14 @@ function connectLogStream() {
  * @param {Object} log - 日志对象 {timestamp, level, message}
  */
 function appendLog(log) {
+    console.log('➕ 添加日志到UI:', log);
+    
     const container = document.getElementById('logs-container');
+    if (!container) {
+        console.error('❌ 日志容器不存在！');
+        return;
+    }
+    
     const entry = document.createElement('div');
     entry.className = 'log-entry';
     
@@ -198,6 +216,7 @@ function appendLog(log) {
     `;
     
     container.appendChild(entry);
+    console.log('✅ 日志已添加到DOM，当前日志数:', container.children.length);
     
     // 限制日志数量
     while (container.children.length > 500) {
