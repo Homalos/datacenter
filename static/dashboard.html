@@ -13,7 +13,7 @@
         
         body {
             font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Microsoft YaHei', sans-serif;
-            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            background: #f5f5f7;
             min-height: 100vh;
             padding: 20px;
         }
@@ -25,19 +25,21 @@
         
         header {
             text-align: center;
-            color: white;
+            color: #1d1d1f;
             margin-bottom: 30px;
         }
         
         header h1 {
             font-size: 2.5em;
             margin-bottom: 10px;
-            text-shadow: 2px 2px 4px rgba(0,0,0,0.3);
+            font-weight: 700;
+            letter-spacing: -0.5px;
         }
         
         header p {
             font-size: 1.1em;
-            opacity: 0.9;
+            color: #6e6e73;
+            font-weight: 400;
         }
         
         .grid {
@@ -55,33 +57,42 @@
         
         .card {
             background: white;
-            border-radius: 12px;
-            padding: 24px;
-            box-shadow: 0 10px 30px rgba(0,0,0,0.2);
+            border-radius: 18px;
+            padding: 28px;
+            box-shadow: 0 2px 8px rgba(0,0,0,0.04), 0 4px 16px rgba(0,0,0,0.06);
+            transition: transform 0.2s, box-shadow 0.2s;
+            border: 1px solid rgba(0,0,0,0.06);
+        }
+        
+        .card:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 4px 12px rgba(0,0,0,0.06), 0 8px 24px rgba(0,0,0,0.08);
         }
         
         .card h2 {
             font-size: 1.5em;
             margin-bottom: 20px;
-            color: #333;
-            border-bottom: 2px solid #667eea;
+            color: #1d1d1f;
+            border-bottom: 2px solid #3b82f6;
             padding-bottom: 10px;
+            font-weight: 600;
         }
         
         .status-badge {
             display: inline-block;
-            padding: 8px 16px;
-            border-radius: 20px;
+            padding: 8px 18px;
+            border-radius: 24px;
             font-weight: bold;
             font-size: 0.9em;
             text-transform: uppercase;
+            box-shadow: 0 1px 4px rgba(0,0,0,0.08);
         }
         
-        .status-stopped { background: #e74c3c; color: white; }
-        .status-starting { background: #f39c12; color: white; }
-        .status-running { background: #27ae60; color: white; }
-        .status-stopping { background: #e67e22; color: white; }
-        .status-error { background: #c0392b; color: white; }
+        .status-stopped { background: linear-gradient(135deg, #64748b 0%, #475569 100%); color: white; }
+        .status-starting { background: linear-gradient(135deg, #f59e0b 0%, #d97706 100%); color: white; }
+        .status-running { background: linear-gradient(135deg, #10b981 0%, #059669 100%); color: white; }
+        .status-stopping { background: linear-gradient(135deg, #f97316 0%, #ea580c 100%); color: white; }
+        .status-error { background: linear-gradient(135deg, #ef4444 0%, #dc2626 100%); color: white; }
         
         .control-buttons {
             display: flex;
@@ -93,45 +104,67 @@
         button {
             padding: 12px 24px;
             border: none;
-            border-radius: 8px;
+            border-radius: 10px;
             font-size: 1em;
             font-weight: 600;
             cursor: pointer;
-            transition: all 0.3s;
+            transition: all 0.3s ease;
             display: flex;
             align-items: center;
             gap: 8px;
+            box-shadow: 0 1px 4px rgba(0,0,0,0.08);
         }
         
         button:hover {
             transform: translateY(-2px);
-            box-shadow: 0 5px 15px rgba(0,0,0,0.2);
+            box-shadow: 0 4px 12px rgba(0,0,0,0.15);
+        }
+        
+        button:active {
+            transform: translateY(0);
         }
         
         button:disabled {
             opacity: 0.5;
             cursor: not-allowed;
             transform: none;
+            box-shadow: 0 1px 4px rgba(0,0,0,0.08);
         }
         
         .btn-start {
-            background: #27ae60;
+            background: linear-gradient(135deg, #10b981 0%, #059669 100%);
             color: white;
+        }
+        
+        .btn-start:hover {
+            background: linear-gradient(135deg, #059669 0%, #047857 100%);
         }
         
         .btn-stop {
-            background: #e74c3c;
+            background: linear-gradient(135deg, #ef4444 0%, #dc2626 100%);
             color: white;
+        }
+        
+        .btn-stop:hover {
+            background: linear-gradient(135deg, #dc2626 0%, #b91c1c 100%);
         }
         
         .btn-restart {
-            background: #3498db;
+            background: linear-gradient(135deg, #3b82f6 0%, #2563eb 100%);
             color: white;
         }
         
+        .btn-restart:hover {
+            background: linear-gradient(135deg, #2563eb 0%, #1d4ed8 100%);
+        }
+        
         .btn-refresh {
-            background: #95a5a6;
+            background: linear-gradient(135deg, #64748b 0%, #475569 100%);
             color: white;
+        }
+        
+        .btn-refresh:hover {
+            background: linear-gradient(135deg, #475569 0%, #334155 100%);
         }
         
         .info-grid {
@@ -142,26 +175,36 @@
         }
         
         .info-item {
-            background: #f8f9fa;
-            padding: 15px;
-            border-radius: 8px;
-            border-left: 4px solid #667eea;
+            background: #fafafa;
+            padding: 18px;
+            border-radius: 12px;
+            border-left: 4px solid #3b82f6;
+            box-shadow: 0 1px 4px rgba(0,0,0,0.04);
+            transition: all 0.2s;
+            border: 1px solid rgba(0,0,0,0.06);
+        }
+        
+        .info-item:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 2px 8px rgba(0,0,0,0.06);
+            background: #f5f5f5;
         }
         
         .info-item label {
             display: block;
             font-size: 0.85em;
-            color: #666;
+            color: #6e6e73;
             margin-bottom: 5px;
             text-transform: uppercase;
             letter-spacing: 0.5px;
+            font-weight: 500;
         }
         
         .info-item value {
             display: block;
             font-size: 1.3em;
             font-weight: 600;
-            color: #333;
+            color: #1d1d1f;
         }
         
         .modules-list {
@@ -183,35 +226,40 @@
         
         .module-name {
             font-weight: 600;
-            color: #333;
+            color: #1d1d1f;
         }
         
         .module-status {
             font-size: 0.85em;
-            padding: 4px 12px;
-            border-radius: 12px;
+            padding: 5px 14px;
+            border-radius: 14px;
+            font-weight: 600;
+            box-shadow: 0 1px 3px rgba(0,0,0,0.08);
         }
         
-        .module-pending { background: #95a5a6; color: white; }
-        .module-starting { background: #f39c12; color: white; }
-        .module-running { background: #27ae60; color: white; }
-        .module-error { background: #e74c3c; color: white; }
+        .module-pending { background: linear-gradient(135deg, #94a3b8 0%, #64748b 100%); color: white; }
+        .module-starting { background: linear-gradient(135deg, #fbbf24 0%, #f59e0b 100%); color: white; }
+        .module-running { background: linear-gradient(135deg, #34d399 0%, #10b981 100%); color: white; }
+        .module-error { background: linear-gradient(135deg, #f87171 0%, #ef4444 100%); color: white; }
+        .module-registered { background: linear-gradient(135deg, #60a5fa 0%, #3b82f6 100%); color: white; }
         
         .logs-container {
-            background: #1e1e1e;
-            color: #d4d4d4;
-            padding: 15px;
-            border-radius: 8px;
-            font-family: 'Consolas', 'Monaco', monospace;
+            background: #1e293b;
+            color: #e2e8f0;
+            padding: 18px;
+            border-radius: 12px;
+            font-family: 'Consolas', 'Monaco', 'Courier New', monospace;
             font-size: 0.9em;
             max-height: 500px;
             overflow-y: auto;
             margin-top: 15px;
+            box-shadow: inset 0 2px 8px rgba(0,0,0,0.2);
+            border: 1px solid #334155;
         }
         
         .log-entry {
-            padding: 6px 0;
-            border-bottom: 1px solid #333;
+            padding: 8px 0;
+            border-bottom: 1px solid #334155;
         }
         
         .log-entry:last-child {
@@ -219,25 +267,27 @@
         }
         
         .log-timestamp {
-            color: #858585;
+            color: #94a3b8;
             margin-right: 10px;
+            font-size: 0.9em;
         }
         
         .log-level {
-            padding: 2px 8px;
-            border-radius: 4px;
-            font-size: 0.85em;
+            padding: 3px 10px;
+            border-radius: 6px;
+            font-size: 0.8em;
             margin-right: 10px;
             font-weight: bold;
+            box-shadow: 0 1px 3px rgba(0,0,0,0.2);
         }
         
-        .log-INFO { background: #3498db; color: white; }
-        .log-WARNING { background: #f39c12; color: white; }
-        .log-ERROR { background: #e74c3c; color: white; }
-        .log-DEBUG { background: #95a5a6; color: white; }
+        .log-INFO { background: linear-gradient(135deg, #60a5fa 0%, #3b82f6 100%); color: white; }
+        .log-WARNING { background: linear-gradient(135deg, #fbbf24 0%, #f59e0b 100%); color: white; }
+        .log-ERROR { background: linear-gradient(135deg, #f87171 0%, #ef4444 100%); color: white; }
+        .log-DEBUG { background: linear-gradient(135deg, #94a3b8 0%, #64748b 100%); color: white; }
         
         .log-message {
-            color: #d4d4d4;
+            color: #e2e8f0;
         }
         
         .spinner {
@@ -255,21 +305,23 @@
         }
         
         .alert {
-            padding: 15px;
-            border-radius: 8px;
+            padding: 16px 20px;
+            border-radius: 12px;
             margin-bottom: 20px;
+            box-shadow: 0 1px 4px rgba(0,0,0,0.08);
+            font-weight: 500;
         }
         
         .alert-error {
-            background: #fce4e4;
-            border-left: 4px solid #e74c3c;
-            color: #c0392b;
+            background: #fef2f2;
+            border-left: 4px solid #ef4444;
+            color: #991b1b;
         }
         
         .alert-success {
-            background: #d4edda;
-            border-left: 4px solid #27ae60;
-            color: #155724;
+            background: #f0fdf4;
+            border-left: 4px solid #10b981;
+            color: #065f46;
         }
         
         .full-width {
@@ -283,7 +335,7 @@
         }
         
         .link-section a {
-            color: #667eea;
+            color: #3b82f6;
             text-decoration: none;
             margin-right: 20px;
             font-weight: 500;
@@ -291,6 +343,40 @@
         
         .link-section a:hover {
             text-decoration: underline;
+        }
+        
+        /* 自定义滚动条样式 */
+        .logs-container::-webkit-scrollbar,
+        .modules-list::-webkit-scrollbar {
+            width: 8px;
+        }
+        
+        .logs-container::-webkit-scrollbar-track {
+            background: #0f172a;
+            border-radius: 4px;
+        }
+        
+        .logs-container::-webkit-scrollbar-thumb {
+            background: #475569;
+            border-radius: 4px;
+        }
+        
+        .logs-container::-webkit-scrollbar-thumb:hover {
+            background: #64748b;
+        }
+        
+        .modules-list::-webkit-scrollbar-track {
+            background: #f5f5f7;
+            border-radius: 4px;
+        }
+        
+        .modules-list::-webkit-scrollbar-thumb {
+            background: #d1d1d6;
+            border-radius: 4px;
+        }
+        
+        .modules-list::-webkit-scrollbar-thumb:hover {
+            background: #aeaeb2;
         }
     </style>
 </head>
@@ -369,11 +455,7 @@
                     </button>
                 </div>
                 <div class="logs-container" id="logs-container">
-                    <div class="log-entry">
-                        <span class="log-timestamp">2025-10-27 17:40:00</span>
-                        <span class="log-level log-INFO">INFO</span>
-                        <span class="log-message">Web控制面板已就绪，等待启动数据中心...</span>
-                    </div>
+                    <!-- 日志将在此处实时显示 -->
                 </div>
             </div>
         </div>
@@ -387,11 +469,37 @@
         
         // 页面加载时初始化
         document.addEventListener('DOMContentLoaded', function() {
+            // 显示初始提醒日志
+            showInitialLog();
             refreshStatus();
             connectLogStream();
             // 每3秒刷新一次状态
             statusInterval = setInterval(refreshStatus, 3000);
         });
+        
+        // 显示初始提醒日志
+        function showInitialLog() {
+            const container = document.getElementById('logs-container');
+            const now = new Date();
+            const timestamp = now.toLocaleString('zh-CN', {
+                year: 'numeric',
+                month: '2-digit',
+                day: '2-digit',
+                hour: '2-digit',
+                minute: '2-digit',
+                second: '2-digit',
+                hour12: false
+            });
+            
+            const entry = document.createElement('div');
+            entry.className = 'log-entry';
+            entry.innerHTML = `
+                <span class="log-timestamp">${timestamp}</span>
+                <span class="log-level log-INFO">INFO</span>
+                <span class="log-message">Web控制面板已加载，等待连接数据中心...</span>
+            `;
+            container.appendChild(entry);
+        }
         
         // 刷新状态
         async function refreshStatus() {

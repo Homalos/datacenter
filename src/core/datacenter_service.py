@@ -117,7 +117,9 @@ class DataCenterService:
         # 启动线程
         self._start_thread: Optional[threading.Thread] = None
         
+        # 记录初始化完成（同时输出到日志和Web界面）
         self.logger.info("数据中心服务初始化完成")
+        self._add_log("INFO", "数据中心服务初始化完成")
     
     def _update_state(self, **kwargs):
         """更新服务状态"""
@@ -127,10 +129,7 @@ class DataCenterService:
                     setattr(self._state, key, value)
             self._state.last_update = datetime.now().isoformat()
             
-            # 计算运行时间
-            if self._state.start_time and self._state.status == ServiceStatus.RUNNING:
-                start_dt = datetime.fromisoformat(self._state.start_time)
-                self._state.uptime_seconds = int((datetime.now() - start_dt).total_seconds())
+            # 注意：运行时长现在在 get_state() 中实时计算，无需在此处更新
     
     def _add_log(self, level: str, message: str, **extra):
         """添加日志"""
@@ -167,9 +166,30 @@ class DataCenterService:
         return self._log_buffer[-limit:]
     
     def get_state(self) -> ServiceState:
-        """获取当前状态"""
+        """获取当前状态（实时计算运行时长）"""
         with self._state_lock:
-            return self._state
+            # 深拷贝状态，避免修改原始对象
+            state_copy = ServiceState(
+                status=self._state.status,
+                start_time=self._state.start_time,
+                uptime_seconds=self._state.uptime_seconds,
+                modules=self._state.modules.copy(),
+                error_message=self._state.error_message,
+                last_update=datetime.now().isoformat()
+            )
+            
+            # 实时计算运行时长
+            if state_copy.start_time and state_copy.status == ServiceStatus.RUNNING:
+                try:
+                    start_dt = datetime.fromisoformat(state_copy.start_time)
+                    state_copy.uptime_seconds = int((datetime.now() - start_dt).total_seconds())
+                except Exception as e:
+                    msg = f"计算运行时长失败: {e}"
+                    self.logger.error(msg)
+                    # 注：此错误极少发生，记录到Web界面供诊断
+                    self._add_log("ERROR", msg)
+            
+            return state_copy
     
     def get_state_dict(self) -> dict:
         """获取状态字典"""
@@ -192,7 +212,9 @@ class DataCenterService:
         """
         with self._state_lock:
             if self._state.status in [ServiceStatus.RUNNING, ServiceStatus.STARTING]:
-                self.logger.warning(f"数据中心已在运行或启动中，当前状态: {self._state.status}")
+                msg = f"数据中心已在运行或启动中，当前状态: {self._state.status}"
+                self.logger.warning(msg)
+                self._add_log("WARNING", msg)
                 return False
             
             # 更新状态为启动中
@@ -549,7 +571,9 @@ class DataCenterService:
         """
         with self._state_lock:
             if self._state.status != ServiceStatus.RUNNING:
-                self.logger.warning(f"数据中心未运行，当前状态: {self._state.status}")
+                msg = f"数据中心未运行，当前状态: {self._state.status}"
+                self.logger.warning(msg)
+                self._add_log("WARNING", msg)
                 return False
             
             self._update_state(status=ServiceStatus.STOPPING)
