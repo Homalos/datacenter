@@ -103,7 +103,6 @@ class BarData(BaseData):
     bar_type: Interval = None
     instrument_id: str = None
     exchange_id: Exchange = None
-    timestamp: datetime.datetime = None  # K线开始时间（标准化后）
     trading_day: str = None  # 交易日
     update_time: str = None  # 最后更新时间
     open_price: float = 0.0
@@ -113,6 +112,8 @@ class BarData(BaseData):
     volume: int = 0
     open_interest: float = 0.0
     last_volume: int = 0  # K线开始时的累计成交量，用于计算当前K线的成交量
+    # 时间戳，自定义的字段，在原始数据中不存在
+    timestamp: datetime = None  # K线开始时间
 
 @dataclass
 class OrderData(BaseData):

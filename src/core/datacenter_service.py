@@ -19,6 +19,7 @@ from enum import Enum
 from dataclasses import dataclass, asdict, field
 from datetime import datetime
 
+from config import settings
 from src.core.event import Event, EventType
 from src.core.event_bus import EventBus
 from src.core.storage import DataStorage
@@ -292,8 +293,8 @@ class DataCenterService:
             self.hybrid_storage = HybridStorage(
                 event_bus=self.event_bus,  # 传入事件总线，自动订阅 TICK 事件
                 sqlite_db_path="data/db",
-                parquet_tick_path="data/ticks",  # Tick数据存储路径
-                parquet_kline_path="data/klines",  # K线数据存储路径
+                parquet_tick_path=settings.TICK_PATH,  # Tick数据存储路径 (data/csv/ticks)
+                parquet_kline_path=settings.KLINE_PATH,  # K线数据存储路径 (data/csv/klines)
                 retention_days=7,
                 flush_interval=60,  # 定时刷新间隔（秒）
                 max_buffer_size=10000,  # 缓冲区上限

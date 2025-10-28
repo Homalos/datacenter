@@ -32,8 +32,8 @@ class DataStorage:
     数据存储类 - 支持多合约、按日期文件夹存储（分离式压缩策略）
     
     文件结构：
-    - 交易时间：data/ticks/{date}/{symbol}.csv（未压缩，高性能）
-    - 非交易时间：data/ticks/{date}.tar.gz（整个文件夹压缩为一个文件）
+    - 交易时间：data/csv/ticks/{date}/{symbol}.csv（未压缩，高性能）
+    - 非交易时间：data/csv/ticks/{date}.tar.gz（整个文件夹压缩为一个文件）
     
     优势：
     1. 交易时间：CSV未压缩写入，性能最优
@@ -89,7 +89,7 @@ class DataStorage:
                 # 回退到系统日期
                 date = datetime.now().strftime("%Y%m%d")
         
-        # data/ticks/{trading_day}/{symbol}.csv（未压缩）
+        # data/csv/ticks/{trading_day}/{symbol}.csv（未压缩）
         date_dir = Path(self.base_path) / date
         date_dir.mkdir(parents=True, exist_ok=True)
         return date_dir / f"{symbol}.csv"
@@ -275,7 +275,7 @@ class DataStorage:
             
             date_str = date_folder.name
             if start_date and end_date and start_date <= date_str <= end_date:
-                # data/ticks/{date}/{symbol}.csv（未压缩）
+                # data/csv/ticks/{date}/{symbol}.csv（未压缩）
                 symbol_file = date_folder / f"{symbol}.csv"
                 if symbol_file.exists() and symbol_file.stat().st_size > 0:
                     try:
@@ -327,7 +327,7 @@ class DataStorage:
             
             date_str = date_folder.name
             if start_date and end_date and start_date <= date_str <= end_date:
-                # data/klines/{date}/{symbol}.csv（未压缩）
+                # data/csv/klines/{date}/{symbol}.csv（未压缩）
                 symbol_file = date_folder / f"{symbol}.csv"
                 if symbol_file.exists() and symbol_file.stat().st_size > 0:
                     try:

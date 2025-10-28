@@ -29,10 +29,10 @@ class DataCompressor:
     2. 将整个交易日文件夹压缩为tar.gz
     3. 定期清理旧的未压缩数据
     
-    工作流程：
-    - 每日收盘后（如16:00）开始压缩前一交易日数据
-    - 将 data/ticks/20251027/ 压缩为 data/ticks/20251027.tar.gz
-    - 压缩成功后删除原文件夹
+        工作流程：
+        - 每日收盘后（如16:00）开始压缩前一交易日数据
+        - 将 data/csv/ticks/20251027/ 压缩为 data/csv/ticks/20251027.tar.gz
+        - 压缩成功后删除原文件夹
     """
     
     def __init__(
@@ -200,10 +200,10 @@ class DataCompressor:
         """
         去重和排序文件夹中所有CSV文件
         
-        Args:
-            base_path: 数据根目录（如 data/ticks）
-            trading_day: 交易日（如 20251028）
-            data_type: 数据类型（"Tick" 或 "K线"）
+            Args:
+                base_path: 数据根目录（如 data/csv/ticks）
+                trading_day: 交易日（如 20251028）
+                data_type: 数据类型（"Tick" 或 "K线"）
         """
         folder_path = Path(base_path) / trading_day
         

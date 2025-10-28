@@ -18,6 +18,8 @@ class Const:
     # ================== 项目中目录名称 ==================
     DATA_DIR_NAME = "data"  # 数据目录名
 
+    CSV_DIR_NAME = "csv"  # CSV数据子目录名
+
     TICK_DIR_NAME = "ticks"  # TICK数据子目录名
 
     KLINE_DIR_NAME = "klines"  # K线数据子目录名

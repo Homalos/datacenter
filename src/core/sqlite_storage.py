@@ -109,71 +109,98 @@ class SQLiteStorage:
         return day_dir / f"{instrument_id}.db"
     
     def _init_tick_table(self, conn) -> None:
-        """初始化Tick表结构"""
+        """
+        初始化Tick表结构（45个字段，PascalCase命名）
+        
+        字段顺序（按用户指定）：
+        1. TradingDay: 交易日
+        2. ExchangeID: 交易所代码
+        3. LastPrice: 最新价
+        4. PreSettlementPrice: 昨结算价
+        5. PreClosePrice: 昨收盘价
+        6. PreOpenInterest: 昨持仓量
+        7. OpenPrice: 开盘价
+        8. HighestPrice: 最高价
+        9. LowestPrice: 最低价
+        10. Volume: 成交量
+        11. Turnover: 成交额
+        12. OpenInterest: 持仓量
+        13. ClosePrice: 收盘价
+        14. SettlementPrice: 结算价
+        15. UpperLimitPrice: 涨停价
+        16. LowerLimitPrice: 跌停价
+        17. PreDelta: 昨虚实度
+        18. CurrDelta: 今虚实度
+        19. UpdateTime: 更新时间
+        20. UpdateMillisec: 更新毫秒
+        21-40. 五档买卖盘口
+        41. AveragePrice: 均价
+        42. ActionDay: 实际日期
+        43. InstrumentID: 合约代码
+        44. ExchangeInstID: 交易所合约代码
+        45. BandingUpperPrice: 波动上限
+        46. BandingLowerPrice: 波动下限
+        47. Timestamp: 完整时间戳
+        """
         with conn:
             conn.execute("""
                 CREATE TABLE IF NOT EXISTS ticks (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    instrument_id TEXT NOT NULL,
-                    exchange_id TEXT NOT NULL,
-                    exchange_inst_id TEXT,
-                    datetime TIMESTAMP NOT NULL,
-                    trading_day TEXT NOT NULL,
-                    action_day TEXT,
-                    timestamp TIMESTAMP,
-                    update_time TEXT,
-                    update_millisec INTEGER,
-                    last_price REAL,
-                    open_price REAL,
-                    highest_price REAL,
-                    lowest_price REAL,
-                    close_price REAL,
-                    average_price REAL,
-                    pre_settlement_price REAL,
-                    pre_close_price REAL,
-                    pre_open_interest REAL,
-                    settlement_price REAL,
-                    upper_limit_price REAL,
-                    lower_limit_price REAL,
-                    banding_upper_price REAL,
-                    banding_lower_price REAL,
-                    volume INTEGER,
-                    turnover REAL,
-                    open_interest REAL,
-                    pre_delta REAL,
-                    curr_delta REAL,
-                    bid_price_1 REAL,
-                    bid_volume_1 INTEGER,
-                    ask_price_1 REAL,
-                    ask_volume_1 INTEGER,
-                    bid_price_2 REAL,
-                    bid_volume_2 INTEGER,
-                    ask_price_2 REAL,
-                    ask_volume_2 INTEGER,
-                    bid_price_3 REAL,
-                    bid_volume_3 INTEGER,
-                    ask_price_3 REAL,
-                    ask_volume_3 INTEGER,
-                    bid_price_4 REAL,
-                    bid_volume_4 INTEGER,
-                    ask_price_4 REAL,
-                    ask_volume_4 INTEGER,
-                    bid_price_5 REAL,
-                    bid_volume_5 INTEGER,
-                    ask_price_5 REAL,
-                    ask_volume_5 INTEGER,
-                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                    ID INTEGER PRIMARY KEY AUTOINCREMENT,
+                    TradingDay TEXT,
+                    ExchangeID TEXT,
+                    LastPrice REAL,
+                    PreSettlementPrice REAL,
+                    PreClosePrice REAL,
+                    PreOpenInterest REAL,
+                    OpenPrice REAL,
+                    HighestPrice REAL,
+                    LowestPrice REAL,
+                    Volume INTEGER,
+                    Turnover REAL,
+                    OpenInterest REAL,
+                    ClosePrice REAL,
+                    SettlementPrice REAL,
+                    UpperLimitPrice REAL,
+                    LowerLimitPrice REAL,
+                    PreDelta REAL,
+                    CurrDelta REAL,
+                    UpdateTime TEXT,
+                    UpdateMillisec INTEGER,
+                    BidPrice1 REAL,
+                    BidVolume1 INTEGER,
+                    AskPrice1 REAL,
+                    AskVolume1 INTEGER,
+                    BidPrice2 REAL,
+                    BidVolume2 INTEGER,
+                    AskPrice2 REAL,
+                    AskVolume2 INTEGER,
+                    BidPrice3 REAL,
+                    BidVolume3 INTEGER,
+                    AskPrice3 REAL,
+                    AskVolume3 INTEGER,
+                    BidPrice4 REAL,
+                    BidVolume4 INTEGER,
+                    AskPrice4 REAL,
+                    AskVolume4 INTEGER,
+                    BidPrice5 REAL,
+                    BidVolume5 INTEGER,
+                    AskPrice5 REAL,
+                    AskVolume5 INTEGER,
+                    AveragePrice REAL,
+                    ActionDay TEXT,
+                    InstrumentID TEXT NOT NULL,
+                    ExchangeInstID TEXT,
+                    BandingUpperPrice REAL,
+                    BandingLowerPrice REAL,
+                    Timestamp TIMESTAMP NOT NULL,
+                    CreatedAt TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                 )
             """)
             
-            # 创建索引
+            # 创建索引（按合约、交易日和时间查询）
             conn.execute("""
-                CREATE INDEX IF NOT EXISTS idx_tick_symbol_time
-                ON ticks(instrument_id, datetime)
-            """)
-            conn.execute("""
-                CREATE INDEX IF NOT EXISTS idx_tick_trading_day
-                ON ticks(trading_day)
+                CREATE INDEX IF NOT EXISTS idx_tick_instrument_time
+                ON ticks(InstrumentID, TradingDay, Timestamp)
             """)
             
             # 启用WAL模式（提高并发性能）
@@ -182,40 +209,51 @@ class SQLiteStorage:
             conn.execute("PRAGMA cache_size=10000")
     
     def _init_kline_table(self, conn) -> None:
-        """初始化K线表结构"""
+        """
+        初始化K线表结构（精简版，包含13个核心字段，PascalCase命名）
+        
+        字段说明（按表顺序）：
+        - ID: 自增主键
+        - BarType: K线类型/周期
+        - TradingDay: 交易日（用于分库）
+        - UpdateTime: 最后更新时间
+        - InstrumentID: 合约代码
+        - ExchangeID: 交易所代码
+        - Volume: 成交量
+        - OpenInterest: 持仓量
+        - OpenPrice: 开盘价
+        - HighestPrice: 最高价
+        - LowestPrice: 最低价
+        - ClosePrice: 收盘价
+        - LastVolume: K线开始时的累计成交量
+        - Timestamp: K线开始时间（完整datetime，用于时间范围查询）
+        - CreatedAt: 记录创建时间
+        """
         with conn:
             conn.execute("""
                 CREATE TABLE IF NOT EXISTS klines (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    instrument_id TEXT NOT NULL,
-                    exchange_id TEXT NOT NULL,
-                    interval TEXT NOT NULL,
-                    bar_type TEXT,
-                    datetime TIMESTAMP NOT NULL,
-                    timestamp TIMESTAMP,
-                    trading_day TEXT,
-                    update_time TEXT,
-                    open REAL,
-                    open_price REAL,
-                    high REAL,
-                    high_price REAL,
-                    low REAL,
-                    low_price REAL,
-                    close REAL,
-                    close_price REAL,
-                    volume INTEGER,
-                    last_volume INTEGER,
-                    turnover REAL,
-                    open_interest REAL,
-                    last_open_interest REAL,
-                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                    ID INTEGER PRIMARY KEY AUTOINCREMENT,
+                    BarType TEXT NOT NULL,
+                    TradingDay TEXT,
+                    UpdateTime TEXT,
+                    InstrumentID TEXT NOT NULL,
+                    ExchangeID TEXT NOT NULL,
+                    Volume INTEGER,
+                    OpenInterest REAL,
+                    OpenPrice REAL,
+                    HighestPrice REAL,
+                    LowestPrice REAL,
+                    ClosePrice REAL,
+                    LastVolume INTEGER,
+                    Timestamp TIMESTAMP NOT NULL,
+                    CreatedAt TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                 )
             """)
             
-            # 创建索引
+            # 创建索引（按合约、K线类型和时间查询，优化时间范围过滤）
             conn.execute("""
-                CREATE INDEX IF NOT EXISTS idx_kline_symbol_interval_time
-                ON klines(instrument_id, interval, datetime)
+                CREATE INDEX IF NOT EXISTS idx_kline_instrument_time
+                ON klines(InstrumentID, BarType, Timestamp)
             """)
             
             # 启用WAL模式
@@ -399,17 +437,17 @@ class SQLiteStorage:
         实际执行Tick数据写入（在写入线程中调用，按合约+交易日分库）
         
         Args:
-            df: Tick数据DataFrame
+            df: Tick数据DataFrame（45个字段，PascalCase命名）
         """
         try:
-            # 数据清洗：确保必要字段存在
-            required_cols = ["instrument_id", "exchange_id", "datetime", "trading_day"]
+            # 数据清洗：确保必要字段存在（PascalCase命名）
+            required_cols = ["InstrumentID", "ExchangeID", "Timestamp", "TradingDay"]
             if not all(col in df.columns for col in required_cols):
-                self.logger.warning(f"Tick数据缺少必要字段: {required_cols}")
+                self.logger.warning(f"Tick数据缺少必要字段: {required_cols}，实际字段: {df.columns.tolist()}")
                 return
             
             # 按合约和交易日分组
-            grouped = df.groupby(["instrument_id", "trading_day"])
+            grouped = df.groupby(["InstrumentID", "TradingDay"])
             
             for (instrument_id, trading_day), group_df in grouped:
                 # 获取该合约+交易日的数据库文件路径
@@ -473,17 +511,17 @@ class SQLiteStorage:
         实际执行K线数据写入（在写入线程中调用，按合约+交易日分库）
         
         Args:
-            df: K线数据DataFrame
+            df: K线数据DataFrame（包含13个核心字段，PascalCase命名）
         """
         try:
-            # 数据清洗：确保必要字段存在
-            required_cols = ["instrument_id", "exchange_id", "interval", "datetime", "trading_day"]
+            # 数据清洗：确保必要字段存在（PascalCase命名）
+            required_cols = ["InstrumentID", "ExchangeID", "BarType", "Timestamp", "TradingDay"]
             if not all(col in df.columns for col in required_cols):
-                self.logger.warning(f"K线数据缺少必要字段: {required_cols}")
+                self.logger.warning(f"K线数据缺少必要字段: {required_cols}，实际字段: {df.columns.tolist()}")
                 return
             
             # 按合约和交易日分组
-            grouped = df.groupby(["instrument_id", "trading_day"])
+            grouped = df.groupby(["InstrumentID", "TradingDay"])
             
             for (instrument_id, trading_day), group_df in grouped:
                 # 获取该合约+交易日的数据库文件路径
@@ -520,7 +558,7 @@ class SQLiteStorage:
                     start_time: str,
                     end_time: str) -> pd.DataFrame:
         """
-        查询Tick数据
+        查询Tick数据（使用Timestamp字段，PascalCase命名）
         
         Args:
             instrument_id: 合约代码
@@ -528,16 +566,16 @@ class SQLiteStorage:
             end_time: 结束时间（ISO格式）
         
         Returns:
-            Tick数据DataFrame
+            Tick数据DataFrame（45个字段，PascalCase命名）
         """
         try:
             with self._get_conn(self.tick_db_file) as conn:
                 query = """
                     SELECT * FROM ticks
-                    WHERE instrument_id = ?
-                    AND datetime >= ?
-                    AND datetime <= ?
-                    ORDER BY datetime
+                    WHERE InstrumentID = ?
+                    AND Timestamp >= ?
+                    AND Timestamp <= ?
+                    ORDER BY Timestamp
                 """
                 df = pd.read_sql_query(
                     query, 
@@ -557,26 +595,30 @@ class SQLiteStorage:
                      start_time: str,
                      end_time: str) -> pd.DataFrame:
         """
-        查询K线数据
+        查询K线数据（使用Timestamp字段进行精确时间范围查询）
         
         Args:
             instrument_id: 合约代码
-            interval: K线周期
-            start_time: 开始时间（ISO格式）
-            end_time: 结束时间（ISO格式）
+            interval: K线周期（对应BarType字段）
+            start_time: 开始时间（ISO格式，如 '2025-10-27 14:00:00'）
+            end_time: 结束时间（ISO格式，如 '2025-10-28 16:00:00'）
         
         Returns:
-            K线数据DataFrame
+            K线数据DataFrame（13个字段，PascalCase命名）
+        
+        Note:
+            使用 Timestamp 字段（完整datetime）进行时间范围过滤，
+            支持精确的跨天查询，查询性能已通过索引优化
         """
         try:
             with self._get_conn(self.kline_db_file) as conn:
                 query = """
                     SELECT * FROM klines
-                    WHERE instrument_id = ?
-                    AND interval = ?
-                    AND datetime >= ?
-                    AND datetime <= ?
-                    ORDER BY datetime
+                    WHERE InstrumentID = ?
+                    AND BarType = ?
+                    AND Timestamp >= ?
+                    AND Timestamp <= ?
+                    ORDER BY Timestamp
                 """
                 df = pd.read_sql_query(
                     query, 
