@@ -419,40 +419,17 @@ class CtpMdApi(MdApi):
         data: In-depth market information
         return: None
         """
-        # 添加回调调用计数器（用于调试，确认回调是否被调用）
-        if not hasattr(self, '_callback_count'):
-            self._callback_count = 0
-            self.logger.info("🎯 onRtnDepthMarketData 回调已激活")
-        
-        self._callback_count += 1
-        
-        # 每50次回调打印一次（即使数据被过滤）
-        if self._callback_count % 50 == 0:
-            self.logger.info(f"📊 已接收 {self._callback_count} 次行情回调（包含被过滤的数据）")
-        
         # 此处要判断是否无效数据，例如非交易时间段的数据，避免无效数据推送给上层
         if data:
             # 过滤没有时间戳的异常行情数据
             # Filter out abnormal market data without timestamps
             if not data.get("UpdateTime"):
-                if not hasattr(self, '_no_timestamp_count'):
-                    self._no_timestamp_count = 0
-                self._no_timestamp_count += 1
-                if self._no_timestamp_count <= 3:  # 只打印前3次
-                    self.logger.warning(f"⚠️  跳过没有时间戳的市场行情数据（已跳过{self._no_timestamp_count}条）")
                 return
 
             instrument_id: str = data.get("InstrumentID", "UNKNOWN")
             # 过滤还没有收到合约数据前的行情推送(没有交易过的数据)
             contract: ContractData | None = symbol_contract_map.get(instrument_id)
             if not contract:
-                if not hasattr(self, '_no_contract_count'):
-                    self._no_contract_count: int = 0
-                    self._no_contract_set: set[str] = set()
-                self._no_contract_count += 1
-                if instrument_id not in self._no_contract_set:
-                    self._no_contract_set.add(instrument_id)
-                    self.logger.warning(f"⚠️  跳过未知合约的行情: {instrument_id}（累计跳过{self._no_contract_count}条，涉及{len(self._no_contract_set)}个合约）")
                 return
 
             # 对大商所的交易日字段取本地日期
@@ -470,9 +447,9 @@ class CtpMdApi(MdApi):
             if not hasattr(self, '_tick_count'):
                 self._tick_count = 0
             self._tick_count += 1
-            
+            # 调试模式下，打印Tick数据，避免大量日志刷新
             if self._tick_count % 10 == 0:
-                self.logger.info(f"✓ 已接收 {self._tick_count} 条Tick | 最新: {tick.instrument_id} @ {tick.update_time} P={tick.last_price}")
+                self.logger.debug(f"✓ 已接收 {self._tick_count} 条Tick | 最新: {tick.instrument_id} @ {tick.update_time} P={tick.last_price}")
 
             self.gateway.event_bus.publish(
                 Event.tick(

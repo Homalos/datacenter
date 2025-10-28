@@ -439,8 +439,8 @@ class DataCenterService:
                 name="TraderGateway",
                 instance=self.trader_gateway,
                 dependencies=["EventBus"],
-                start_func=start_trader_gateway,
-                required=False  # 标记为非必需，失败不影响行情网关
+                start_func=start_trader_gateway
+                # 注：交易网关设计为非必需，start_func中捕获异常但不抛出
             )
             self._update_module_status("TraderGateway", "registered")
             

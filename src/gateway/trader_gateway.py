@@ -213,7 +213,7 @@ class TraderGateway(BaseGateway):
                 self.td_api.close()
 
         # 初始化定时查询账户资金和持仓信息
-        self.init_query_acc_pos()
+        # self.init_query_acc_pos()  # 数据中心不需要定时查询资金和持仓信息
 
     def send_order(self, req: OrderRequest) -> str:
         """
@@ -332,7 +332,7 @@ class CtpTdApi(TdApi):
         self.address: str = ""  # 服务器地址 Server address
         self.broker_id: str = ""  # 经纪公司代码
         self.user_id: str = ""  # 用户代码
-        self.user_product_info: str = "Homalos"  # 用户端产品信息
+        self.user_product_info: str = ""  # 用户端产品信息
         self.password: str = ""  # 密码
         self.auth_code: str = ""  # 认证码
         self.app_id: str = ""  # App代码
@@ -679,7 +679,6 @@ class CtpTdApi(TdApi):
                 for position in self.positions.values():
                     # 将仓位数据推送到事件总线
                     self.gateway.on_position(position)
-                    self.logger.info(f"持仓数据: {position}")
 
                 self.positions.clear()
 
