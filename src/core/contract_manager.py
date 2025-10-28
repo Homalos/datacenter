@@ -10,6 +10,8 @@
 @Description: 合约管理器 - 管理全市场合约列表，自动订阅全部合约
 """
 import json
+import threading
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
@@ -72,14 +74,26 @@ class ContractManager:
         # 已订阅的合约集合
         self.subscribed_symbols: set[str] = set()
         
+        # 网关就绪状态管理
+        self._md_gateway_ready = False      # 行情网关是否就绪
+        self._td_gateway_ready = False      # 交易网关是否就绪（或超时）
+        self._subscription_triggered = False  # 是否已触发订阅（防止重复）
+        self._gateway_ready_lock = threading.Lock()
+        
         # 加载全部合约列表
         self._load_contracts()
         
         # 订阅行情网关登录成功事件
-        self.event_bus.subscribe(EventType.MD_GATEWAY_LOGIN, self._on_gateway_login)
+        self.event_bus.subscribe(EventType.MD_GATEWAY_LOGIN, self._on_md_gateway_login)
+        
+        # 订阅交易网关登录成功事件
+        self.event_bus.subscribe(EventType.TD_GATEWAY_LOGIN, self._on_td_gateway_login)
         
         # 订阅Tick事件，用于更新合约最后tick时间
         self.event_bus.subscribe(EventType.TICK, self._on_tick)
+        
+        # 启动超时检查线程（最长等待60秒）
+        self._start_timeout_checker()
     
     def _load_contracts(self) -> None:
         """从配置文件加载全部合约列表（同时填充全局symbol_contract_map）"""
@@ -117,9 +131,68 @@ class ContractManager:
         except Exception as e:
             self.logger.error(f"加载合约配置失败: {e}", exc_info=True)
     
-    def _on_gateway_login(self, event: Event) -> None:
+    def _start_timeout_checker(self) -> None:
         """
-        行情网关登录成功回调 - 自动订阅全部合约
+        启动智能超时检查线程
+        
+        策略：
+        - 每3秒检查一次交易网关状态
+        - 最长等待60秒
+        - 如果在60秒内成功登录，立即触发订阅
+        - 如果60秒后仍未登录，放弃等待并继续（使用系统日期）
+        """
+        def timeout_worker():
+            max_wait_time = 60  # 最长等待60秒
+            check_interval = 3   # 每3秒检查一次
+            elapsed_time = 0
+            
+            while elapsed_time < max_wait_time:
+                time.sleep(check_interval)
+                elapsed_time += check_interval
+                
+                with self._gateway_ready_lock:
+                    # 检查是否已经触发订阅（可能由交易网关登录成功触发）
+                    if self._subscription_triggered:
+                        self.logger.debug(
+                            f"交易网关已就绪（等待{elapsed_time}秒），超时检查线程退出"
+                        )
+                        return  # 已经订阅，退出线程
+                    
+                    # 检查是否交易网关已就绪但行情网关未就绪（罕见情况）
+                    if self._td_gateway_ready and not self._md_gateway_ready:
+                        self.logger.debug(
+                            f"交易网关已就绪但行情网关未就绪（已等待{elapsed_time}秒），继续等待..."
+                        )
+                        continue
+                    
+                    # 如果行情网关就绪但交易网关未就绪，每次循环打印等待日志
+                    if self._md_gateway_ready and not self._td_gateway_ready:
+                        self.logger.info(
+                            f"⏳ 等待交易网关登录... (已等待{elapsed_time}秒/最多60秒)"
+                        )
+            
+            # 超时：60秒后仍未就绪
+            with self._gateway_ready_lock:
+                if not self._td_gateway_ready and not self._subscription_triggered:
+                    self.logger.warning(
+                        f"⚠️ 交易网关登录超时（{max_wait_time}秒），将使用系统日期继续订阅行情"
+                    )
+                    self._td_gateway_ready = True  # 标记为就绪（超时fallback）
+                    self._check_and_subscribe()
+                elif self._subscription_triggered:
+                    self.logger.debug("订阅已触发，超时检查线程正常退出")
+        
+        timeout_thread = threading.Thread(
+            target=timeout_worker,
+            name="ContractManager-TimeoutChecker",
+            daemon=True
+        )
+        timeout_thread.start()
+        self.logger.debug("智能超时检查线程已启动（每3秒检查一次，最长等待60秒）")
+    
+    def _on_md_gateway_login(self, event: Event) -> None:
+        """
+        行情网关登录成功回调
         
         Args:
             event: 登录事件
@@ -130,11 +203,56 @@ class ContractManager:
                 self.logger.warning("行情网关登录失败，跳过订阅")
                 return
             
-            self.logger.info("行情网关登录成功，开始订阅全部合约...")
-            self.subscribe_all()
+            with self._gateway_ready_lock:
+                self.logger.info("✓ 行情网关已就绪，等待交易网关...")
+                self._md_gateway_ready = True
+                self._check_and_subscribe()
         
         except Exception as e:
-            self.logger.error(f"处理登录事件失败: {e}", exc_info=True)
+            self.logger.error(f"处理行情网关登录事件失败: {e}", exc_info=True)
+    
+    def _on_td_gateway_login(self, event: Event) -> None:
+        """
+        交易网关登录成功回调
+        
+        Args:
+            event: 登录事件
+        """
+        try:
+            payload = event.payload
+            trading_day = "未知"
+            
+            if payload and payload.get("code") == 0:
+                # 登录成功，提取trading_day
+                trading_day = payload.get("data", {}).get("TradingDay", "未知")
+                
+                with self._gateway_ready_lock:
+                    self.logger.info(f"✓ 交易网关已就绪，交易日: {trading_day}")
+                    self._td_gateway_ready = True
+                    self._check_and_subscribe()
+            else:
+                # 登录失败，不影响行情订阅（使用系统日期fallback）
+                self.logger.warning("交易网关登录失败，将使用系统日期")
+                with self._gateway_ready_lock:
+                    self._td_gateway_ready = True  # 标记为就绪（fallback）
+                    self._check_and_subscribe()
+        
+        except Exception as e:
+            self.logger.error(f"处理交易网关登录事件失败: {e}", exc_info=True)
+    
+    def _check_and_subscribe(self) -> None:
+        """
+        检查两个网关都就绪后触发订阅（需持有锁）
+        
+        Note:
+            此方法必须在持有 _gateway_ready_lock 的情况下调用
+        """
+        if self._md_gateway_ready and self._td_gateway_ready and not self._subscription_triggered:
+            self._subscription_triggered = True  # 防止重复订阅
+            self.logger.info("=" * 60)
+            self.logger.info("行情网关和交易网关都已就绪，开始订阅全部合约...")
+            self.logger.info("=" * 60)
+            self.subscribe_all()
     
     def _on_tick(self, event: Event) -> None:
         """

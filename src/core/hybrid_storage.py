@@ -50,6 +50,8 @@ class HybridStorage:
                  retention_days: int = 7,
                  flush_interval: int = 60,
                  max_buffer_size: int = 10000,
+                 buffer_warning_threshold: float = 0.7,  # 警告阈值（70%）
+                 buffer_flush_threshold: float = 0.85,  # 提前刷新阈值（85%）
                  trading_day_manager = None):
         """
         初始化混合存储
@@ -62,6 +64,8 @@ class HybridStorage:
             retention_days: SQLite数据保留天数
             flush_interval: 定时刷新间隔（秒），默认60秒（1分钟）
             max_buffer_size: 缓冲区上限，默认10000条（防止内存爆炸）
+            buffer_warning_threshold: 警告阈值（0.7 = 70%）
+            buffer_flush_threshold: 提前刷新阈值（0.85 = 85%）
             trading_day_manager: 交易日管理器
         """
         self.logger = get_logger(self.__class__.__name__)
@@ -86,8 +90,17 @@ class HybridStorage:
         self.retention_days = retention_days
         self.flush_interval = flush_interval
         self.max_buffer_size = max_buffer_size
+        self.buffer_warning_threshold = buffer_warning_threshold
+        self.buffer_flush_threshold = buffer_flush_threshold
         
-        # Tick 数据缓冲区（无上限，但会根据max_buffer_size触发提前刷新）
+        # 计算实际阈值（条数）
+        self._warning_size = int(max_buffer_size * buffer_warning_threshold)  # 7000条
+        self._flush_size = int(max_buffer_size * buffer_flush_threshold)      # 8500条
+        
+        # 缓冲区锁（保护并发访问，防止数据丢失）
+        self._buffer_lock = threading.Lock()
+        
+        # Tick 数据缓冲区
         self.tick_buffer: deque[TickData] = deque()
         
         # 统计计数器
@@ -104,12 +117,14 @@ class HybridStorage:
         if event_bus:
             event_bus.subscribe(EventType.TICK, self._on_tick)
             self.logger.info(
-                f"已订阅 TICK 事件，定时刷新: {flush_interval}秒，缓冲区上限: {max_buffer_size}条"
+                f"已订阅 TICK 事件，定时刷新: {flush_interval}秒，"
+                f"缓冲区: {max_buffer_size}条（⚠️{self._warning_size} / 🟡{self._flush_size} / 🔴{max_buffer_size}）"
             )
         
         self.logger.info(
             f"混合存储初始化完成，SQLite保留{retention_days}天，"
-            f"定时刷新: 每{flush_interval}秒，缓冲区上限: {max_buffer_size}条"
+            f"三级阈值策略: ⚠️警告{int(buffer_warning_threshold*100)}% / "
+            f"🟡提前刷新{int(buffer_flush_threshold*100)}% / 🔴紧急刷新100%"
         )
     
     def _start_flush_thread(self) -> None:
@@ -124,7 +139,7 @@ class HybridStorage:
         self.logger.info(f"定时刷新线程已启动，间隔: {self.flush_interval}秒")
     
     def _flush_worker(self) -> None:
-        """定时刷新工作线程"""
+        """定时刷新工作线程（已适配锁机制）"""
         last_flush_time = time.time()
         
         while not self._stop_flush.is_set():
@@ -134,11 +149,14 @@ class HybridStorage:
                 elapsed = current_time - last_flush_time
                 
                 if elapsed >= self.flush_interval:
-                    if len(self.tick_buffer) > 0:
-                        self.logger.info(
-                            f"⏰ 定时触发刷新，缓冲区: {len(self.tick_buffer)} 条Tick"
-                        )
-                        self._flush_tick_buffer()
+                    # 持锁检查并刷新
+                    with self._buffer_lock:
+                        buffer_size = len(self.tick_buffer)
+                        if buffer_size > 0:
+                            self.logger.info(
+                                f"⏰ 定时触发刷新，缓冲区: {buffer_size} 条Tick"
+                            )
+                            self._flush_tick_buffer_locked()
                     last_flush_time = current_time
                 
                 # 短暂休眠（避免CPU占用）
@@ -149,7 +167,7 @@ class HybridStorage:
                 time.sleep(5)  # 异常后等待5秒
     
     def stop(self) -> None:
-        """停止定时刷新线程，刷新剩余缓冲区"""
+        """停止定时刷新线程，刷新剩余缓冲区（已适配锁机制）"""
         self.logger.info("正在停止 HybridStorage...")
         
         # 停止定时刷新线程
@@ -158,31 +176,34 @@ class HybridStorage:
             self._flush_thread.join(timeout=5.0)
             self.logger.info("定时刷新线程已停止")
         
-        # 刷新剩余缓冲区
-        if len(self.tick_buffer) > 0:
-            self.logger.warning(
-                f"优雅关闭：刷新剩余 {len(self.tick_buffer)} 条Tick..."
-            )
-            self._flush_tick_buffer()
-            self.logger.info("✓ 缓冲区已刷新")
+        # 刷新剩余缓冲区（持锁检查）
+        with self._buffer_lock:
+            buffer_size = len(self.tick_buffer)
+            if buffer_size > 0:
+                self.logger.warning(
+                    f"优雅关闭：刷新剩余 {buffer_size} 条Tick..."
+                )
+                self._flush_tick_buffer_locked()
+                self.logger.info("✓ 缓冲区已刷新")
         
         self.logger.info("HybridStorage 已停止")
     
     def _on_tick(self, event: Event) -> None:
         """
-        处理 TICK 事件（定时刷新 + 缓冲区安全阀）
+        处理 TICK 事件（三级阈值策略 + 锁保护）
         
         Args:
             event: TICK 事件
             
-        触发策略：
-            1. 主策略：定时刷新（每60秒）- 减少锁竞争
-            2. 安全阀：缓冲区达到上限时提前刷新 - 防止内存爆炸
+        触发策略（三级阈值）：
+            1. 主策略：定时刷新（每60秒） - 正常负载
+            2. 提前刷新：缓冲区达到85%时提前刷新 - 中高负载
+            3. 紧急刷新：缓冲区达到100%时紧急刷新 - 极高负载（安全阀）
         
-        Note:
-            - 主要由定时刷新线程触发写入（每分钟一次）
-            - 当缓冲区达到max_buffer_size时，触发紧急刷新
-            - 程序退出时由stop()方法刷新剩余数据
+        线程安全：
+            - 使用 _buffer_lock 保护缓冲区的并发访问
+            - 复制+清空操作在锁保护下原子执行
+            - 实际保存在后台线程执行，避免阻塞Tick接收
         """
         try:
             # 解析 Tick 数据
@@ -196,43 +217,104 @@ class HybridStorage:
                 self.logger.warning("TICK事件中的data为空")
                 return
             
-            # 添加到缓冲区
-            self.tick_buffer.append(tick)
-            self._tick_recv_count += 1
+            # ===== 临界区：添加到缓冲区并检查阈值 =====
+            with self._buffer_lock:
+                self.tick_buffer.append(tick)
+                buffer_size = len(self.tick_buffer)
+                self._tick_recv_count += 1
+                
+                # 🔴 紧急刷新（100%）：缓冲区已满（安全阀）
+                if buffer_size >= self.max_buffer_size:
+                    buffer_usage = buffer_size / self.max_buffer_size * 100
+                    self.logger.error(
+                        f"🔴 缓冲区已满 ({buffer_size}/{self.max_buffer_size} 条, {buffer_usage:.1f}%)，"
+                        f"触发紧急刷新（安全阀）"
+                    )
+                    self._flush_tick_buffer_locked()
+                    return
+                
+                # 🟡 提前刷新（85%）：缓冲区接近满（主动防御）
+                if buffer_size >= self._flush_size:
+                    buffer_usage = buffer_size / self.max_buffer_size * 100
+                    self.logger.warning(
+                        f"🟡 缓冲区达到刷新阈值 ({buffer_size}/{self.max_buffer_size} 条, {buffer_usage:.1f}%)，"
+                        f"触发提前刷新"
+                    )
+                    self._flush_tick_buffer_locked()
+                    return
+                
+                # ⚠️ 警告（70%）：缓冲区使用率偏高（仅记录日志，每1000条打印一次）
+                if buffer_size >= self._warning_size:
+                    if self._tick_recv_count % 1000 == 0:
+                        buffer_usage = buffer_size / self.max_buffer_size * 100
+                        self.logger.warning(
+                            f"⚠️ 缓冲区使用率偏高 ({buffer_size}/{self.max_buffer_size} 条, {buffer_usage:.1f}%)，"
+                            f"等待定时刷新或提前刷新"
+                        )
+                    return
             
-            # ⚠️ 安全阀：检查缓冲区是否达到上限
-            buffer_size = len(self.tick_buffer)
-            if buffer_size >= self.max_buffer_size:
-                buffer_usage = buffer_size / self.max_buffer_size * 100
-                self.logger.warning(
-                    f"⚠️ 缓冲区达到上限 ({buffer_size}/{self.max_buffer_size} 条, {buffer_usage:.1f}%)，"
-                    f"触发紧急刷新"
-                )
-                # 同步刷新（确保缓冲区被清空）
-                self._flush_tick_buffer()
-            
-            # 每1000条打印统计（监控缓冲区使用率）
-            elif self._tick_recv_count % 1000 == 0:
+            # ===== 正常日志（在临界区外，避免持锁时间过长）=====
+            if self._tick_recv_count % 1000 == 0:
+                # 快速获取缓冲区大小
+                with self._buffer_lock:
+                    buffer_size = len(self.tick_buffer)
                 buffer_usage = buffer_size / self.max_buffer_size * 100
                 self.logger.info(
                     f"✓ HybridStorage已接收 {self._tick_recv_count} 条Tick | "
-                    f"缓冲区: {buffer_size}/{self.max_buffer_size} ({buffer_usage:.1f}%，等待定时刷新)"
+                    f"缓冲区: {buffer_size}/{self.max_buffer_size} ({buffer_usage:.1f}%)"
                 )
         
         except Exception as e:
             self.logger.error(f"处理 TICK 事件失败: {e}", exc_info=True)
     
-    def _flush_tick_buffer(self) -> None:
-        """刷新 Tick 缓冲区到存储层（严格按照 TickData 字段定义）"""
+    def _flush_tick_buffer_locked(self) -> None:
+        """
+        刷新 Tick 缓冲区（持锁版本，调用前必须持有_buffer_lock）
+        
+        关键设计：
+        1. 复制并清空缓冲区（原子操作，在锁保护下）
+        2. 立即释放锁（避免阻塞Tick接收）
+        3. 在后台线程执行实际保存（耗时操作）
+        
+        Note:
+            - 此方法必须在持有_buffer_lock的情况下调用
+            - 调用者负责持有锁，本方法不加锁
+            - 清空后的缓冲区可立即接收新Tick，不会丢失数据
+        """
         if not self.tick_buffer:
             return
         
+        # ===== 临界区：复制并清空（原子操作）=====
+        ticks_to_save = list(self.tick_buffer)
+        self.tick_buffer.clear()
+        # 注意：此时锁仍由调用者持有，在with语句结束时自动释放
+        # 清空后，新的Tick可以立即进入空缓冲区，不会丢失
+        
+        self.logger.info(f"→ 准备刷新 {len(ticks_to_save)} 条Tick到存储层...")
+        
+        # ===== 在后台线程执行保存（避免阻塞Tick接收）=====
+        threading.Thread(
+            target=self._do_save_ticks,
+            args=(ticks_to_save,),
+            name=f"TickSaver-{len(ticks_to_save)}",
+            daemon=True
+        ).start()
+    
+    def _flush_tick_buffer(self) -> None:
+        """刷新 Tick 缓冲区到存储层（兼容旧接口，内部加锁）"""
+        with self._buffer_lock:
+            self._flush_tick_buffer_locked()
+    
+    def _do_save_ticks(self, ticks_to_save: list[TickData]) -> None:
+        """
+        执行实际的Tick数据保存（在后台线程中运行）
+        
+        Args:
+            ticks_to_save: 待保存的Tick数据列表
+        """
         try:
-            # 先创建副本并清空原缓冲区（避免并发修改）
-            ticks_to_save = list(self.tick_buffer)
-            self.tick_buffer.clear()
+            self.logger.info(f"→ 开始保存 {len(ticks_to_save)} 条Tick到存储层...")
             
-            self.logger.info(f"→ 开始刷新 {len(ticks_to_save)} 条Tick到存储层...")
             # 将 TickData 对象转换为 DataFrame（包含所有字段）
             tick_dicts = []
             for tick in ticks_to_save:

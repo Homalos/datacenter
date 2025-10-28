@@ -273,8 +273,10 @@ class DataCenterService:
                 parquet_tick_path="data/ticks",  # Tick数据存储路径
                 parquet_kline_path="data/klines",  # K线数据存储路径
                 retention_days=7,
-                flush_interval=60,  # 每60秒刷新一次缓冲区（定时触发）
-                max_buffer_size=10000,  # 缓冲区上限10000条（安全阀）
+                flush_interval=60,  # 定时刷新间隔（秒）
+                max_buffer_size=10000,  # 缓冲区上限
+                buffer_warning_threshold=0.7,  # 警告阈值（70%）
+                buffer_flush_threshold=0.85,  # 提前刷新阈值（85%）
                 trading_day_manager=self.trading_day_manager  # 传入交易日管理器
             )
             self.starter.register_module(
