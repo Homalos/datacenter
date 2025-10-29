@@ -58,6 +58,9 @@ class AlarmScheduler:
         # 闹钟任务列表
         self.tasks: Dict[str, AlarmTask] = {}
         
+        # 停止标记
+        self._stopped = False
+        
         # 订阅定时器事件
         self.event_bus.subscribe(EventType.TIMER, self._on_timer)
         
@@ -118,6 +121,10 @@ class AlarmScheduler:
         Args:
             event: 定时器事件
         """
+        # 如果已停止，不再处理事件
+        if self._stopped:
+            return
+        
         try:
             now = datetime.now()
             current_time = now.time()
@@ -208,6 +215,30 @@ class AlarmScheduler:
             "enabled_tasks": sum(1 for t in self.tasks.values() if t.enabled),
             "disabled_tasks": sum(1 for t in self.tasks.values() if not t.enabled)
         }
+    
+    def stop(self) -> None:
+        """
+        停止闹钟调度器
+        
+        取消对事件总线的订阅，清理资源
+        """
+        if self._stopped:
+            self.logger.warning("闹钟调度器已经停止")
+            return
+        
+        self.logger.info("正在停止闹钟调度器...")
+        
+        # 取消订阅定时器事件
+        try:
+            self.event_bus.unsubscribe(EventType.TIMER, self._on_timer)
+            self.logger.info("已取消定时器事件订阅")
+        except Exception as e:
+            self.logger.warning(f"取消事件订阅失败: {e}")
+        
+        # 标记为已停止
+        self._stopped = True
+        
+        self.logger.info("闹钟调度器已停止")
 
 
 def create_default_tasks(alarm_scheduler: AlarmScheduler,

@@ -1,65 +1,71 @@
 @echo off
 REM ===================================================================
-REM Homalos æ•°æ®ä¸­å¿ƒå¯åŠ¨è„šæœ¬ (Windows)
+REM Homalos Êý¾ÝÖÐÐÄÆô¶¯½Å±¾ (Windows)
 REM ===================================================================
 
 echo.
 echo ========================================================================
-echo   Homalos æ•°æ®ä¸­å¿ƒå¯åŠ¨è„šæœ¬
+echo   Homalos Êý¾ÝÖÐÐÄÆô¶¯½Å±¾
 echo ========================================================================
 echo.
 
-REM æ£€æŸ¥è™šæ‹ŸçŽ¯å¢ƒ
+REM ¼ì²éÐéÄâ»·¾³
 if not exist ".venv\Scripts\activate.bat" (
-    echo [é”™è¯¯] è™šæ‹ŸçŽ¯å¢ƒä¸å­˜åœ¨ï¼Œè¯·å…ˆåˆ›å»ºè™šæ‹ŸçŽ¯å¢ƒ
-    echo è¿è¡Œ: python -m venv .venv
+    echo [´íÎó] ÐéÄâ»·¾³²»´æÔÚ£¬ÇëÏÈ´´½¨ÐéÄâ»·¾³
+    echo ÔËÐÐ: python -m venv .venv
     pause
     exit /b 1
 )
 
-REM æ¿€æ´»è™šæ‹ŸçŽ¯å¢ƒ
-echo [1/3] æ¿€æ´»è™šæ‹ŸçŽ¯å¢ƒ...
+REM ¼¤»îÐéÄâ»·¾³
+echo [1/3] ¼¤»îÐéÄâ»·¾³...
 call .venv\Scripts\activate.bat
 
-REM æ£€æŸ¥ç«¯å£å ç”¨ï¼ˆå¯é€‰ï¼‰
+REM ¼ì²é¶Ë¿ÚÕ¼ÓÃ£¨¿ÉÑ¡£©
 echo.
-echo [2/3] æ£€æŸ¥ç«¯å£å ç”¨...
+echo [2/3] ¼ì²é¶Ë¿ÚÕ¼ÓÃ...
 set DEFAULT_PORT=8001
 netstat -ano | findstr :%DEFAULT_PORT% > nul
 if %errorlevel% == 0 (
-    echo [è­¦å‘Š] ç«¯å£ %DEFAULT_PORT% å·²è¢«å ç”¨
+    echo [¾¯¸æ] ¶Ë¿Ú %DEFAULT_PORT% ÒÑ±»Õ¼ÓÃ
     echo.
-    echo å¯é€‰æ“ä½œï¼š
-    echo   1. ä½¿ç”¨å…¶ä»–ç«¯å£å¯åŠ¨ ï¼ˆæŽ¨èï¼‰
-    echo   2. å…³é—­å ç”¨ç«¯å£çš„è¿›ç¨‹
-    echo   3. å–æ¶ˆå¯åŠ¨
+    echo ¿ÉÑ¡²Ù×÷£º
+    echo   1. Ê¹ÓÃÆäËû¶Ë¿ÚÆô¶¯ £¨ÍÆ¼ö£©
+    echo   2. ¹Ø±ÕÕ¼ÓÃ¶Ë¿ÚµÄ½ø³Ì
+    echo   3. È¡ÏûÆô¶¯
     echo.
-    set /p choice="è¯·é€‰æ‹© (1/2/3): "
+    set /p choice="ÇëÑ¡Ôñ (1/2/3): "
     
     if "%choice%"=="1" (
-        set /p custom_port="è¯·è¾“å…¥æ–°ç«¯å£å· (ä¾‹å¦‚ 8002): "
+        set /p custom_port="ÇëÊäÈëÐÂ¶Ë¿ÚºÅ (ÀýÈç 8002): "
         set API_PORT=!custom_port!
-        echo [ä¿¡æ¯] å°†ä½¿ç”¨ç«¯å£ !custom_port! å¯åŠ¨
+        echo [ÐÅÏ¢] ½«Ê¹ÓÃ¶Ë¿Ú !custom_port! Æô¶¯
     ) else if "%choice%"=="2" (
         netstat -ano | findstr :%DEFAULT_PORT%
-        set /p pid="è¯·è¾“å…¥è¦å…³é—­çš„è¿›ç¨‹ID (PID): "
+        set /p pid="ÇëÊäÈëÒª¹Ø±ÕµÄ½ø³ÌID (PID): "
         taskkill /F /PID !pid!
-        echo [ä¿¡æ¯] è¿›ç¨‹å·²å…³é—­ï¼Œå°†ä½¿ç”¨é»˜è®¤ç«¯å£ %DEFAULT_PORT% å¯åŠ¨
+        echo [ÐÅÏ¢] ½ø³ÌÒÑ¹Ø±Õ£¬½«Ê¹ÓÃÄ¬ÈÏ¶Ë¿Ú %DEFAULT_PORT% Æô¶¯
     ) else (
-        echo [ä¿¡æ¯] å·²å–æ¶ˆå¯åŠ¨
+        echo [ÐÅÏ¢] ÒÑÈ¡ÏûÆô¶¯
         pause
         exit /b 0
     )
 ) else (
-    echo [ä¿¡æ¯] ç«¯å£ %DEFAULT_PORT% å¯ç”¨
+    echo [ÐÅÏ¢] ¶Ë¿Ú %DEFAULT_PORT% ¿ÉÓÃ
 )
 
-REM å¯åŠ¨æ•°æ®ä¸­å¿ƒ
+REM Æô¶¯ Web ¿ØÖÆÃæ°å
 echo.
-echo [3/3] å¯åŠ¨æ•°æ®ä¸­å¿ƒ...
+echo [3/3] Æô¶¯ Web ¿ØÖÆÃæ°å...
 echo ========================================================================
 echo.
-python start_datacenter.py
+echo ÌáÊ¾£º
+echo   - Web ¿ØÖÆÃæ°å½«ÔÚ http://localhost:%DEFAULT_PORT%/dashboard Æô¶¯
+echo   - ÔÚ Web ½çÃæÖÐµã»÷"Æô¶¯Êý¾ÝÖÐÐÄ"°´Å¥
+echo.
+echo ========================================================================
+echo.
+python start_web.py
 
 pause
 

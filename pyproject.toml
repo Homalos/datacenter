@@ -16,3 +16,6 @@ dependencies = [
     "sse-starlette>=2.0.0",
     "pyarrow>=12.0.0",
 ]
+
+[dependency-groups]
+dev = []

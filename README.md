@@ -1,4 +1,36 @@
-# 期货数据中心文档索引
+# Homalos 期货数据中心
+
+## 🚀 快速启动
+
+### 方式一：Web 控制面板（推荐）⭐
+
+```bash
+# 1. 激活虚拟环境并启动 Web 服务
+.venv\Scripts\activate
+python start_web.py
+
+# 2. 访问 Web 控制面板
+http://localhost:8000/dashboard
+
+# 3. 在 Web 界面中点击"启动数据中心"按钮
+```
+
+**优势**：
+- ✅ 支持 Web 界面启动/停止
+- ✅ 实时查看日志流
+- ✅ 监控系统健康状态
+- ✅ 更灵活的控制方式
+
+### 方式二：直接启动（已废弃）
+
+```bash
+# ⚠️ 已废弃，仅供参考
+# python start_datacenter.py.deprecated
+```
+
+**说明**：v0.3.0 开始，推荐使用 Web 控制面板方式启动。旧的 `start_datacenter.py` 已重命名为 `.deprecated` 后缀，保留作为备份。
+
+---
 
 ## 📚 文档列表
 

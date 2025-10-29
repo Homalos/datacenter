@@ -265,39 +265,40 @@ class DataCenterService:
             self._add_log("INFO", "初始化存储层...")
             
             # Parquet 存储（使用trading_day_manager）
-            parquet_storage = DataStorage(
+            self.parquet_storage = DataStorage(
                 base_path="data",
                 trading_day_manager=self.trading_day_manager
             )
             self.starter.register_module(
                 name="ParquetStorage",
-                instance=parquet_storage,
+                instance=self.parquet_storage,
                 dependencies=[]
             )
             self._update_module_status("ParquetStorage", "registered")
             
             # SQLite 存储（按交易日+合约分库）
-            sqlite_storage = SQLiteStorage(
+            self.sqlite_storage = SQLiteStorage(
                 db_path="data/db",
                 retention_days=7,
                 trading_day_manager=self.trading_day_manager
             )
             self.starter.register_module(
                 name="SQLiteStorage",
-                instance=sqlite_storage,
-                dependencies=[]
+                instance=self.sqlite_storage,
+                dependencies=[],
+                stop_func=lambda storage: storage.stop()
             )
             self._update_module_status("SQLiteStorage", "registered")
             
             # 混合存储（订阅 TICK 事件自动保存数据）
+            # 🔥 初始化混合存储（DuckDB + CSV双层存储）
             self.hybrid_storage = HybridStorage(
                 event_bus=self.event_bus,  # 传入事件总线，自动订阅 TICK 事件
-                sqlite_db_path="data/db",
-                parquet_tick_path=settings.TICK_PATH,  # Tick数据存储路径 (data/csv/ticks)
-                parquet_kline_path=settings.KLINE_PATH,  # K线数据存储路径 (data/csv/klines)
-                retention_days=7,
+                parquet_tick_path=settings.TICK_PATH,  # Tick数据CSV归档路径 (data/csv/ticks)
+                parquet_kline_path=settings.KLINE_PATH,  # K线数据CSV归档路径 (data/csv/klines)
+                retention_days=7,  # 保留天数（用于未来的查询分层）
                 flush_interval=60,  # 定时刷新间隔（秒）
-                max_buffer_size=10000,  # 缓冲区上限
+                max_buffer_size=100000,  # 🔥 缓冲区上限提高到10万（减少IO频率）
                 buffer_warning_threshold=0.7,  # 警告阈值（70%）
                 buffer_flush_threshold=0.85,  # 提前刷新阈值（85%）
                 trading_day_manager=self.trading_day_manager  # 传入交易日管理器
@@ -305,7 +306,8 @@ class DataCenterService:
             self.starter.register_module(
                 name="HybridStorage",
                 instance=self.hybrid_storage,
-                dependencies=["SQLiteStorage", "ParquetStorage"]
+                dependencies=["SQLiteStorage", "ParquetStorage"],
+                stop_func=lambda storage: storage.stop()
             )
             self._update_module_status("HybridStorage", "registered")
             
@@ -501,8 +503,8 @@ class DataCenterService:
             self._add_log("INFO", "初始化数据归档器...")
             self.data_archiver = DataArchiver(
                 event_bus=self.event_bus,
-                sqlite_storage=sqlite_storage,
-                parquet_storage=parquet_storage,
+                sqlite_storage=self.sqlite_storage,
+                parquet_storage=self.parquet_storage,
                 retention_days=7
             )
             self.starter.register_module(
@@ -522,12 +524,12 @@ class DataCenterService:
                 event_bus=self.event_bus
             )
             
-            # AlarmScheduler 不需要显式启动/停止，它在初始化时已经订阅了事件
+            # 注册 AlarmScheduler（需要 stop_func 来清理事件订阅）
             self.starter.register_module(
                 name="AlarmScheduler",
                 instance=self.alarm_scheduler,
-                dependencies=["EventBus"]
-                # 不需要 start_func 和 stop_func
+                dependencies=["EventBus"],
+                stop_func=lambda scheduler: scheduler.stop()
             )
             self._update_module_status("AlarmScheduler", "registered")
             
@@ -587,19 +589,8 @@ class DataCenterService:
     def _stop_internal(self):
         """内部停止逻辑"""
         try:
-            # 优先刷新 HybridStorage 缓冲区（防止数据丢失）
-            if self.hybrid_storage:
-                self._add_log("INFO", "正在刷新 HybridStorage 缓冲区...")
-                self.hybrid_storage.stop()
-                self._add_log("INFO", "✓ HybridStorage 缓冲区已刷新")
-            
-            # 停止 SQLiteStorage 写入队列
-            if hasattr(self, 'sqlite_storage') and self.sqlite_storage:
-                self._add_log("INFO", "正在停止 SQLiteStorage 写入队列...")
-                self.sqlite_storage.stop()
-                self._add_log("INFO", "✓ SQLiteStorage 已停止")
-            
-            # 停止所有模块（按启动顺序的逆序）
+            # 停止所有模块（按启动顺序的逆序，确保依赖关系正确）
+            # HybridStorage 和 SQLiteStorage 的 stop() 方法会自动刷新缓冲区
             if self.starter:
                 self._add_log("INFO", "停止所有模块...")
                 self.starter.stop()

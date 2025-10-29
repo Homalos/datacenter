@@ -60,10 +60,16 @@ else
     echo "[信息] 端口 $DEFAULT_PORT 可用"
 fi
 
-# 启动数据中心
+# 启动 Web 控制面板
 echo ""
-echo "[3/3] 启动数据中心..."
+echo "[3/3] 启动 Web 控制面板..."
 echo "========================================================================"
 echo ""
-python start_datacenter.py
+echo "提示："
+echo "  - Web 控制面板将在 http://localhost:$DEFAULT_PORT/dashboard 启动"
+echo "  - 在 Web 界面中点击\"启动数据中心\"按钮"
+echo ""
+echo "========================================================================"
+echo ""
+python start_web.py
 
