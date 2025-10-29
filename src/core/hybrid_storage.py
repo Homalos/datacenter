@@ -9,18 +9,20 @@
 @Software   : PyCharm
 @Description: 混合存储 - 智能路由SQLite（热数据）和CSV（冷数据，延迟压缩）
 """
-import pandas as pd
 import threading
 import time
-from datetime import datetime, timedelta
-from typing import Optional
 from collections import deque
+from datetime import datetime  # noqa: F401  (保留用于未来的查询功能)
+from typing import Optional
 
+import pandas as pd
+
+# 🔥 新增：DuckDB + 多线程CSV写入器
+from src.core.duckdb_storage import DuckDBSingleFileWriter
 from src.core.event import Event, EventType
 from src.core.event_bus import EventBus
 from src.core.object import TickData
-from src.core.sqlite_storage import SQLiteStorage
-from src.core.storage import DataStorage
+from src.core.partitioned_csv_writer import PartitionedCSVWriter
 from src.utils.log import get_logger
 
 
@@ -44,12 +46,11 @@ class HybridStorage:
     
     def __init__(self,
                  event_bus: Optional[EventBus] = None,
-                 sqlite_db_path: str = "data/db",
                  parquet_tick_path: str = "data/csv/ticks",
                  parquet_kline_path: str = "data/csv/klines",
                  retention_days: int = 7,
                  flush_interval: int = 60,
-                 max_buffer_size: int = 10000,
+                 max_buffer_size: int = 100000,
                  buffer_warning_threshold: float = 0.7,  # 警告阈值（70%）
                  buffer_flush_threshold: float = 0.8,  # 提前刷新阈值（85%）
                  trading_day_manager = None):
@@ -58,7 +59,6 @@ class HybridStorage:
         
         Args:
             event_bus: 事件总线（可选，如果提供则自动订阅 TICK 事件）
-            sqlite_db_path: SQLite数据库路径
             parquet_tick_path: Tick CSV文件路径
             parquet_kline_path: K线 CSV文件路径
             retention_days: SQLite数据保留天数
@@ -70,20 +70,33 @@ class HybridStorage:
         """
         self.logger = get_logger(self.__class__.__name__)
         
-        # SQLite存储层（热数据）
-        self.sqlite_storage = SQLiteStorage(
-            db_path=sqlite_db_path,
-            retention_days=retention_days,
+        # 🔥 DuckDB存储层（极速查询引擎）- 大幅提高批量阈值减少IO
+        self.duckdb_tick_writer = DuckDBSingleFileWriter(
+            db_path="data/duckdb/ticks",
+            batch_threshold=100000,  # 10万条触发写入（减少IO频率）
+            data_type="ticks",
             trading_day_manager=trading_day_manager
         )
         
-        # CSV存储层（冷数据）- 分别管理Tick和K线
-        self.parquet_tick_storage = DataStorage(
-            base_path=parquet_tick_path,
+        self.duckdb_kline_writer = DuckDBSingleFileWriter(
+            db_path="data/duckdb/klines",
+            batch_threshold=50000,  # 🔥 5万条触发写入（从20000提高到50000）
+            data_type="klines",
             trading_day_manager=trading_day_manager
         )
-        self.parquet_kline_storage = DataStorage(
+        
+        # 🔥 CSV多线程写入器（高吞吐归档）- 大幅提高批量阈值减少IO
+        self.csv_tick_writer = PartitionedCSVWriter(
+            base_path=parquet_tick_path,
+            num_threads=4,
+            batch_threshold=100000,  # 🔥 每线程10万条触发写入（从50000提高到100000）
+            trading_day_manager=trading_day_manager
+        )
+        
+        self.csv_kline_writer = PartitionedCSVWriter(
             base_path=parquet_kline_path,
+            num_threads=4,
+            batch_threshold=50000,  # 🔥 每线程5万条触发写入（从10000提高到50000）
             trading_day_manager=trading_day_manager
         )
         
@@ -139,15 +152,34 @@ class HybridStorage:
         self.logger.info(f"定时刷新线程已启动，间隔: {self.flush_interval}秒")
     
     def _flush_worker(self) -> None:
-        """定时刷新工作线程（已适配锁机制 + 快速预检查优化）"""
+        """定时刷新工作线程（🔥 增加健康检查）"""
         last_flush_time = time.time()
+        last_health_check = time.time()  # 🔥 新增
         
         while not self._stop_flush.is_set():
             try:
-                # 检查是否到达刷新时间
                 current_time = time.time()
-                elapsed = current_time - last_flush_time
                 
+                # 🔥 新增：定期健康检查（每5分钟）
+                if current_time - last_health_check >= 300:
+                    try:
+                        health = self.get_health_metrics()
+                        self.logger.info(
+                            f"📊 系统健康检查：{health['health_status']} | "
+                            f"线程: {health['threads']['total_active']} "
+                            f"(工作线程: {health['threads']['worker_count']}) | "
+                            f"DuckDB缓冲: Tick={health['duckdb']['tick_buffered']} "
+                            f"KLine={health['duckdb']['kline_buffered']} | "
+                            f"CSV队列: Tick={health['csv']['tick_queued']} "
+                            f"KLine={health['csv']['kline_queued']} | "
+                            f"Tick缓冲: {health['buffer']['tick_buffer_usage_pct']}%"
+                        )
+                        last_health_check = current_time
+                    except Exception as e:
+                        self.logger.error(f"健康检查失败：{e}")
+                
+                # 原有的定时刷新逻辑
+                elapsed = current_time - last_flush_time
                 if elapsed >= self.flush_interval:
                     # 快速预检查（无锁）：避免在缓冲区为空时仍然获取锁
                     # 注意：这是一个无锁的快速检查，可能不完全准确，但可以减少锁竞争
@@ -172,16 +204,24 @@ class HybridStorage:
                 time.sleep(5)  # 异常后等待5秒
     
     def stop(self) -> None:
-        """停止定时刷新线程，刷新剩余缓冲区（已适配锁机制）"""
+        """
+        停止混合存储（🔥 优雅关闭双层存储）
+        
+        关闭顺序：
+        1. 停止定时刷新线程
+        2. 刷新剩余缓冲区
+        3. 停止DuckDB写入器
+        4. 停止CSV多线程写入器
+        """
         self.logger.info("正在停止 HybridStorage...")
         
-        # 停止定时刷新线程
+        # 1. 停止定时刷新线程
         self._stop_flush.set()
         if self._flush_thread and self._flush_thread.is_alive():
             self._flush_thread.join(timeout=5.0)
-            self.logger.info("定时刷新线程已停止")
+            self.logger.info("✓ 定时刷新线程已停止")
         
-        # 刷新剩余缓冲区（持锁检查）
+        # 2. 刷新剩余缓冲区（持锁检查）
         with self._buffer_lock:
             buffer_size = len(self.tick_buffer)
             if buffer_size > 0:
@@ -191,7 +231,19 @@ class HybridStorage:
                 self._flush_tick_buffer_locked()
                 self.logger.info("✓ 缓冲区已刷新")
         
-        self.logger.info("HybridStorage 已停止")
+        # 3. 🔥 停止DuckDB写入器（刷新所有剩余数据）
+        self.logger.info("停止DuckDB写入器...")
+        self.duckdb_tick_writer.stop()
+        self.duckdb_kline_writer.stop()
+        self.logger.info("✓ DuckDB写入器已停止")
+        
+        # 4. 🔥 停止CSV多线程写入器（刷新所有队列）
+        self.logger.info("停止CSV写入器...")
+        self.csv_tick_writer.stop(timeout=30)
+        self.csv_kline_writer.stop(timeout=30)
+        self.logger.info("✓ CSV写入器已停止")
+        
+        self.logger.info("✅ HybridStorage 已完全停止（双层存储已优雅关闭）")
     
     def _on_tick(self, event: Event) -> None:
         """
@@ -320,21 +372,30 @@ class HybridStorage:
         try:
             self.logger.info(f"→ 开始保存 {len(ticks_to_save)} 条Tick到存储层...")
             
-            # 将 TickData 对象转换为 DataFrame（45个字段，PascalCase命名）
+            # 将 TickData 对象转换为 DataFrame（47个字段，PascalCase命名）
             tick_dicts = []
             for tick in ticks_to_save:
+                # 转换日期格式：YYYYMMDD → YYYY-MM-DD（DuckDB DATE类型要求）
+                def format_date(date_str):
+                    """将YYYYMMDD格式转换为YYYY-MM-DD"""
+                    if date_str and len(str(date_str)) == 8:
+                        s = str(date_str)
+                        return f"{s[:4]}-{s[4:6]}-{s[6:8]}"
+                    return date_str
+                
                 # 构建 Timestamp（完整datetime用于时间序列查询）
                 timestamp_val = None
                 if tick.trading_day and tick.update_time:
                     try:
                         timestamp_val = pd.to_datetime(f"{tick.trading_day} {tick.update_time}.{tick.update_millisec:03d}")
                     except Exception:
+                        # 回退到秒级精度
                         timestamp_val = pd.to_datetime(f"{tick.trading_day} {tick.update_time}")
                 
-                # 按用户指定的45个字段顺序（PascalCase命名）
+                # 按用户指定的47个字段顺序（PascalCase命名）
                 tick_dict = {
                     # 1-2: 基础时间信息
-                    "TradingDay": tick.trading_day,
+                    "TradingDay": format_date(tick.trading_day),  # 转换为YYYY-MM-DD格式
                     "ExchangeID": tick.exchange_id.value if tick.exchange_id else None,
                     
                     # 3-5: 价格信息
@@ -395,9 +456,9 @@ class HybridStorage:
                     "AskPrice5": tick.ask_price_5,
                     "AskVolume5": tick.ask_volume_5,
                     
-                    # 41-45: 其他信息和时间戳
+                    # 41-47: 其他信息和时间戳
                     "AveragePrice": tick.average_price,
-                    "ActionDay": tick.action_day,
+                    "ActionDay": format_date(tick.action_day),  # 转换为YYYY-MM-DD格式
                     "InstrumentID": tick.instrument_id,
                     "ExchangeInstID": tick.exchange_inst_id,
                     "BandingUpperPrice": tick.banding_upper_price,
@@ -418,75 +479,85 @@ class HybridStorage:
     
     def save_ticks(self, df: pd.DataFrame) -> None:
         """
-        保存Tick数据（同时保存到SQLite和Parquet）
+        保存Tick数据（🔥 双层存储：DuckDB极速查询 + CSV多线程归档）
         
         Args:
             df: Tick数据DataFrame
+        
+        新架构：
+        1. DuckDB：极速查询引擎（单线程写入，排序聚类）
+        2. CSV：高吞吐归档（4线程并行，哈希分配）
         """
         if df.empty:
             return
         
         try:
-            self.logger.info(f"  → 保存 {len(df)} 条Tick到SQLite...")
-            # 1. 保存到SQLite（热数据，快速查询）
-            self.sqlite_storage.save_ticks(df)
-            self.logger.info("  ✓ SQLite保存成功")
+            self.logger.info(f"  → 双层写入 {len(df)} 条Tick...")
             
-            # 2. 保存到CSV归档（冷数据，按交易日统一保存）
-            # 不传date参数，使用trading_day_manager的交易日
-            if "InstrumentID" in df.columns:
-                parquet_count = 0
-                for instrument_id, group in df.groupby("InstrumentID"):
-                    self.parquet_tick_storage.save_ticks(
-                        symbol=str(instrument_id),
-                        df=group,
-                        date=None  # 使用trading_day_manager的交易日
-                    )
-                    parquet_count += len(group)
-                self.logger.info(f"  ✓ CSV保存成功 ({parquet_count}条，未压缩，交易日统一)")
+            # 🔥 排序（为DuckDB优化，保证物理连续性）
+            # 这是性能的关键！排序后DuckDB的Zone Maps可以精确裁剪
+            df = df.sort_values(by=['InstrumentID', 'Timestamp']).reset_index(drop=True)
+            
+            # 🔥 1. 写入DuckDB（极速查询）
+            self.duckdb_tick_writer.submit_batch(df)
+            self.logger.info("  ✓ DuckDB写入队列提交成功")
+            
+            # 🔥 2. 写入CSV（多线程归档）
+            self.csv_tick_writer.submit_batch(df)
+            self.logger.info("  ✓ CSV多线程写入队列提交成功")
+            
+            # 获取统计信息
+            duckdb_stats = self.duckdb_tick_writer.get_stats()
+            csv_stats = self.csv_tick_writer.get_stats()
+            
+            self.logger.debug(
+                f"  统计信息 - "
+                f"DuckDB缓冲: {duckdb_stats['total_buffered']}条 | "
+                f"CSV队列: {csv_stats['total_queued']}条"
+            )
         
         except Exception as e:
-            self.logger.error(f"保存Tick数据失败: {e}", exc_info=True)
+            self.logger.error(f"双层写入Tick数据失败: {e}", exc_info=True)
     
     def save_klines(self, df: pd.DataFrame) -> None:
         """
-        保存K线数据（同时保存到SQLite和CSV归档）
+        保存K线数据（🔥 双层存储：DuckDB极速查询 + CSV多线程归档）
         
         Args:
-            df: K线数据DataFrame（包含13个核心字段，PascalCase命名）
+            df: K线数据DataFrame（包含核心字段，PascalCase命名）
         """
         if df.empty:
             return
         
         try:
             # 验证必要字段（PascalCase命名）
-            required_cols = ["InstrumentID", "BarType", "Timestamp"]
+            required_cols = ["InstrumentID", "Timestamp"]
             if not all(col in df.columns for col in required_cols):
                 self.logger.warning(f"K线数据缺少必要字段: {required_cols}，实际字段: {df.columns.tolist()}")
                 return
             
-            # 1. 保存到SQLite（热数据，快速查询）
-            self.sqlite_storage.save_klines(df)
+            self.logger.debug(f"  → 双层写入 {len(df)} 条K线...")
             
-            # 2. 保存到CSV归档（冷数据，按交易日统一保存）
-            # 不传date参数，使用trading_day_manager的交易日
-            for (instrument_id, bar_type), group in df.groupby(["InstrumentID", "BarType"]):
-                symbol_with_interval = f"{instrument_id}_{bar_type}"
-                self.parquet_kline_storage.save_kline(
-                    symbol=symbol_with_interval,
-                    df=group,
-                    date=None  # 使用trading_day_manager的交易日
-                )
+            # 🔥 排序（为DuckDB优化）
+            df = df.sort_values(by=['InstrumentID', 'Timestamp']).reset_index(drop=True)
+            
+            # 🔥 1. 写入DuckDB（极速查询）
+            self.duckdb_kline_writer.submit_batch(df)
+            self.logger.debug("  ✓ DuckDB K线写入队列提交成功")
+            
+            # 🔥 2. 写入CSV（多线程归档）
+            self.csv_kline_writer.submit_batch(df)
+            self.logger.debug("  ✓ CSV K线多线程写入队列提交成功")
         
         except Exception as e:
-            self.logger.error(f"保存K线数据失败: {e}", exc_info=True)
+            self.logger.error(f"双层写入K线数据失败: {e}", exc_info=True)
     
     def query_ticks(self,
                     instrument_id: str,
                     start_time: str,
                     end_time: str) -> pd.DataFrame:
         """
-        查询Tick数据（智能路由）
+        查询Tick数据（🔥 TODO: 需要实现DuckDB查询引擎）
         
         Args:
             instrument_id: 合约代码
@@ -495,60 +566,16 @@ class HybridStorage:
         
         Returns:
             Tick数据DataFrame
-        """
-        try:
-            start_dt = pd.to_datetime(start_time)
-            end_dt = pd.to_datetime(end_time)
-            cutoff_dt = datetime.now() - timedelta(days=self.retention_days)
-            
-            results = []
-            
-            # 1. 查询历史数据（Parquet）
-            if start_dt < cutoff_dt:
-                parquet_end = min(end_dt, cutoff_dt)
-                df_parquet = self._query_ticks_from_parquet(
-                    instrument_id,
-                    start_dt,
-                    parquet_end
-                )
-                if not df_parquet.empty:
-                    results.append(df_parquet)
-                
-                self.logger.debug(
-                    f"从CSV归档查询到 {len(df_parquet)} 条历史Tick数据"
-                )
-            
-            # 2. 查询近期数据（SQLite）
-            if end_dt >= cutoff_dt:
-                sqlite_start = max(start_dt, cutoff_dt)
-                # 使用空格格式（SQLite兼容性更好）
-                sqlite_start_str = str(sqlite_start).replace('T', ' ')[:19]
-                end_dt_str = str(end_dt).replace('T', ' ')[:19]
-                df_sqlite = self.sqlite_storage.query_ticks(
-                    instrument_id,
-                    sqlite_start_str,
-                    end_dt_str
-                )
-                if not df_sqlite.empty:
-                    results.append(df_sqlite)
-                
-                self.logger.debug(
-                    f"从SQLite查询到 {len(df_sqlite)} 条近期Tick数据"
-                )
-            
-            # 3. 合并结果
-            if results:
-                df = pd.concat(results, ignore_index=True)
-                # 使用 Timestamp 字段排序（PascalCase命名）
-                if 'Timestamp' in df.columns:
-                    df = df.sort_values("Timestamp")
-                return df
-            
-            return pd.DataFrame()
         
-        except Exception as e:
-            self.logger.error(f"查询Tick数据失败: {e}", exc_info=True)
-            return pd.DataFrame()
+        Note:
+            当前版本暂未实现查询功能，需要实现DuckDBQueryEngine
+            参考文档：docs/DuckDB存储方案总体设计.md
+        """
+        self.logger.warning(
+            f"查询Tick数据功能暂未实现 [合约: {instrument_id}, "
+            f"时间: {start_time} ~ {end_time}]"
+        )
+        return pd.DataFrame()
     
     def query_klines(self,
                      instrument_id: str,
@@ -556,7 +583,7 @@ class HybridStorage:
                      start_time: str,
                      end_time: str) -> pd.DataFrame:
         """
-        查询K线数据（智能路由）
+        查询K线数据（🔥 TODO: 需要实现DuckDB查询引擎）
         
         Args:
             instrument_id: 合约代码
@@ -566,164 +593,150 @@ class HybridStorage:
         
         Returns:
             K线数据DataFrame
+        
+        Note:
+            当前版本暂未实现查询功能，需要实现DuckDBQueryEngine
+            参考文档：docs/DuckDB存储方案总体设计.md
         """
-        try:
-            start_dt = pd.to_datetime(start_time)
-            end_dt = pd.to_datetime(end_time)
-            cutoff_dt = datetime.now() - timedelta(days=self.retention_days)
-            
-            results = []
-            
-            # 1. 查询历史数据（Parquet）
-            if start_dt < cutoff_dt:
-                parquet_end = min(end_dt, cutoff_dt)
-                df_parquet = self._query_klines_from_parquet(
-                    instrument_id,
-                    interval,
-                    start_dt,
-                    parquet_end
-                )
-                if not df_parquet.empty:
-                    results.append(df_parquet)
-                
-                self.logger.debug(
-                    f"从CSV归档查询到 {len(df_parquet)} 条历史K线数据"
-                )
-            
-            # 2. 查询近期数据（SQLite）
-            if end_dt >= cutoff_dt:
-                sqlite_start = max(start_dt, cutoff_dt)
-                # 使用空格格式（SQLite兼容性更好）
-                sqlite_start_str = str(sqlite_start).replace('T', ' ')[:19]
-                end_dt_str = str(end_dt).replace('T', ' ')[:19]
-                df_sqlite = self.sqlite_storage.query_klines(
-                    instrument_id,
-                    interval,
-                    sqlite_start_str,
-                    end_dt_str
-                )
-                if not df_sqlite.empty:
-                    results.append(df_sqlite)
-                
-                self.logger.debug(
-                    f"从SQLite查询到 {len(df_sqlite)} 条近期K线数据"
-                )
-            
-            # 3. 合并结果
-            if results:
-                df = pd.concat(results, ignore_index=True)
-                # 使用 Timestamp 字段排序（PascalCase命名）
-                if 'Timestamp' in df.columns:
-                    df = df.sort_values("Timestamp")
-                return df
-            
-            return pd.DataFrame()
-        
-        except Exception as e:
-            self.logger.error(f"查询K线数据失败: {e}", exc_info=True)
-            return pd.DataFrame()
-    
-    def _query_ticks_from_parquet(self,
-                                   instrument_id: str,
-                                   start_dt: datetime,
-                                   end_dt: datetime) -> pd.DataFrame:
-        """
-        从Parquet查询Tick数据
-        
-        Args:
-            instrument_id: 合约代码
-            start_dt: 开始时间
-            end_dt: 结束时间
-        
-        Returns:
-            Tick数据DataFrame
-        """
-        results = []
-        
-        # 遍历日期范围
-        current_date = start_dt.date()
-        end_date = end_dt.date()
-        
-        while current_date <= end_date:
-            # 计算当天的开始和结束时间
-            day_start = datetime.combine(current_date, datetime.min.time())
-            day_end = datetime.combine(current_date, datetime.max.time())
-            
-            # 使用 start_time 和 end_time 参数
-            df = self.parquet_tick_storage.query_ticks(
-                symbol=instrument_id,
-                start_time=max(day_start, start_dt).isoformat(),
-                end_time=min(day_end, end_dt).isoformat()
-            )
-            if not df.empty:
-                results.append(df)
-            
-            current_date += timedelta(days=1)
-        
-        if results:
-            return pd.concat(results, ignore_index=True)
-        
-        return pd.DataFrame()
-    
-    def _query_klines_from_parquet(self,
-                                    instrument_id: str,
-                                    interval: str,
-                                    start_dt: datetime,
-                                    end_dt: datetime) -> pd.DataFrame:
-        """
-        从Parquet查询K线数据
-        
-        Args:
-            instrument_id: 合约代码
-            interval: K线周期
-            start_dt: 开始时间
-            end_dt: 结束时间
-        
-        Returns:
-            K线数据DataFrame
-        """
-        results = []
-        
-        # 遍历日期范围
-        current_date = start_dt.date()
-        end_date = end_dt.date()
-        symbol_with_interval = f"{instrument_id}_{interval}"
-        
-        while current_date <= end_date:
-            # 计算当天的开始和结束时间
-            day_start = datetime.combine(current_date, datetime.min.time())
-            day_end = datetime.combine(current_date, datetime.max.time())
-            
-            # 使用 start_time 和 end_time 参数
-            df = self.parquet_kline_storage.query_kline(
-                symbol=symbol_with_interval,
-                start_time=max(day_start, start_dt).isoformat(),
-                end_time=min(day_end, end_dt).isoformat()
-            )
-            if not df.empty:
-                results.append(df)
-            
-            current_date += timedelta(days=1)
-        
-        if results:
-            return pd.concat(results, ignore_index=True)
-        
+        self.logger.warning(
+            f"查询K线数据功能暂未实现 [合约: {instrument_id}, "
+            f"周期: {interval}, 时间: {start_time} ~ {end_time}]"
+        )
         return pd.DataFrame()
     
     def get_statistics(self) -> dict:
         """
-        获取存储统计信息
+        获取存储统计信息（🔥 新架构：DuckDB + CSV）
         
         Returns:
             统计信息字典
         """
-        sqlite_stats = self.sqlite_storage.get_statistics()
-        # parquet_stats = self.parquet_storage.get_statistics()  # 如果有的话
+        # 获取DuckDB和CSV写入器的统计信息
+        duckdb_tick_stats = self.duckdb_tick_writer.get_stats()
+        duckdb_kline_stats = self.duckdb_kline_writer.get_stats()
+        csv_tick_stats = self.csv_tick_writer.get_stats()
+        csv_kline_stats = self.csv_kline_writer.get_stats()
         
         return {
-            "storage_type": "hybrid (SQLite + CSV, 延迟压缩)",
+            "storage_type": "hybrid (DuckDB + CSV 双层存储)",
             "retention_days": self.retention_days,
-            "sqlite": sqlite_stats,
-            # "parquet": parquet_stats
+            "duckdb": {
+                "ticks": duckdb_tick_stats,
+                "klines": duckdb_kline_stats
+            },
+            "csv": {
+                "ticks": csv_tick_stats,
+                "klines": csv_kline_stats
+            }
         }
+    
+    def get_health_metrics(self) -> dict:
+        """
+        获取系统健康指标（🔥 新增监控）
+        
+        Returns:
+            健康指标字典，包含：
+            - 后台线程数量
+            - DuckDB队列状态
+            - CSV队列状态
+            - 缓冲区使用率
+        """
+        import threading
+        
+        # 1. 监控后台线程数量
+        active_threads = threading.active_count()
+        thread_list = threading.enumerate()
+        thread_names = [t.name for t in thread_list]
+        
+        # 分类线程
+        worker_threads = [n for n in thread_names if "Worker" in n or "Saver" in n or "Flush" in n]
+        
+        # 2. 监控DuckDB队列
+        duckdb_tick_stats = self.duckdb_tick_writer.get_stats()
+        duckdb_kline_stats = self.duckdb_kline_writer.get_stats()
+        
+        # 3. 监控CSV队列大小
+        csv_tick_stats = self.csv_tick_writer.get_stats()
+        csv_kline_stats = self.csv_kline_writer.get_stats()
+        
+        # 4. 缓冲区使用率
+        with self._buffer_lock:
+            buffer_size = len(self.tick_buffer)
+        buffer_usage = buffer_size / self.max_buffer_size * 100
+        
+        # 5. 评估健康状态
+        health_status = self._evaluate_health(
+            active_threads, 
+            duckdb_tick_stats.get('total_buffered', 0),
+            csv_tick_stats.get('total_queued', 0),
+            buffer_usage
+        )
+        
+        return {
+            "timestamp": datetime.now().isoformat(),
+            "health_status": health_status,
+            "threads": {
+                "total_active": active_threads,
+                "worker_count": len(worker_threads),
+                "worker_names": worker_threads[:10]  # 只显示前10个
+            },
+            "duckdb": {
+                "tick_buffered": duckdb_tick_stats.get('total_buffered', 0),
+                "kline_buffered": duckdb_kline_stats.get('total_buffered', 0),
+                "tick_threshold": duckdb_tick_stats.get('batch_threshold', 0),
+                "kline_threshold": duckdb_kline_stats.get('batch_threshold', 0)
+            },
+            "csv": {
+                "tick_queued": csv_tick_stats.get('total_queued', 0),
+                "kline_queued": csv_kline_stats.get('total_queued', 0),
+                "tick_workers": csv_tick_stats.get('workers_alive', 0),
+                "kline_workers": csv_kline_stats.get('workers_alive', 0),
+                "queue_sizes": {
+                    "tick": csv_tick_stats.get('queue_sizes', []),
+                    "kline": csv_kline_stats.get('queue_sizes', [])
+                }
+            },
+            "buffer": {
+                "tick_buffer_size": buffer_size,
+                "tick_buffer_max": self.max_buffer_size,
+                "tick_buffer_usage_pct": round(buffer_usage, 2)
+            }
+        }
+    
+    def _evaluate_health(self, threads: int, duckdb_buf: int, 
+                         csv_queue: int, buffer_pct: float) -> str:
+        """
+        评估系统健康状态
+        
+        Args:
+            threads: 活动线程数
+            duckdb_buf: DuckDB缓冲区大小
+            csv_queue: CSV队列大小
+            buffer_pct: Tick缓冲区使用率（百分比）
+        
+        Returns:
+            健康状态字符串
+        """
+        # 🔴 严重
+        if threads > 100:
+            return "🔴 CRITICAL: 线程数过多"
+        if duckdb_buf > 200000:
+            return "🔴 CRITICAL: DuckDB队列严重积压"
+        if csv_queue > 100000:
+            return "🔴 CRITICAL: CSV队列严重积压"
+        if buffer_pct > 90:
+            return "🔴 CRITICAL: Tick缓冲区接近满载"
+        
+        # 🟡 警告
+        if threads > 50:
+            return "🟡 WARNING: 线程数偏高"
+        if duckdb_buf > 100000:
+            return "🟡 WARNING: DuckDB队列积压"
+        if csv_queue > 50000:
+            return "🟡 WARNING: CSV队列积压"
+        if buffer_pct > 70:
+            return "🟡 WARNING: Tick缓冲区使用率偏高"
+        
+        # ✅ 健康
+        return "✅ HEALTHY"
 
