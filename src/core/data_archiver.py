@@ -9,14 +9,15 @@
 @Software   : PyCharm
 @Description: 数据归档器 - 定期将SQLite中的旧数据归档到Parquet
 """
-import pandas as pd
 from datetime import datetime, timedelta
 from typing import Optional
 
+import pandas as pd
+
+from src.core.event import Event
+from src.core.event_bus import EventBus
 from src.core.sqlite_storage import SQLiteStorage
 from src.core.storage import DataStorage
-from src.core.event_bus import EventBus
-from src.core.event import Event, EventType
 from src.utils.log import get_logger
 
 
@@ -88,7 +89,7 @@ class DataArchiver:
         self.logger.info("开始执行数据归档任务...")
         
         start_time = datetime.now()
-        result = {
+        result: dict[str, any] = {
             "start_time": start_time.isoformat(),
             "success": False,
             "tick_archived": 0,
@@ -104,19 +105,19 @@ class DataArchiver:
             self.logger.info(f"归档截止日期: {cutoff_date}")
             
             # 2. 获取可归档数据
-            archivable_data = self.sqlite_storage.get_archivable_data(cutoff_date)
+            achievable_data = self.sqlite_storage.get_archivable_data(cutoff_date)
             
             # 3. 归档Tick数据
-            if not archivable_data['ticks'].empty:
-                tick_count = self._archive_ticks(archivable_data['ticks'])
+            if not achievable_data['ticks'].empty:
+                tick_count = self._archive_ticks(achievable_data['ticks'])
                 result['tick_archived'] = tick_count
                 self.logger.info(f"归档 {tick_count} 条Tick数据")
             else:
                 self.logger.info("没有需要归档的Tick数据")
             
             # 4. 归档K线数据
-            if not archivable_data['klines'].empty:
-                kline_count = self._archive_klines(archivable_data['klines'])
+            if not achievable_data['klines'].empty:
+                kline_count = self._archive_klines(achievable_data['klines'])
                 result['kline_archived'] = kline_count
                 self.logger.info(f"归档 {kline_count} 条K线数据")
             else:

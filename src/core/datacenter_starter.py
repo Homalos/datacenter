@@ -295,7 +295,7 @@ class DataCenterStarter:
     
     def _register_signal_handlers(self) -> None:
         """注册系统信号处理器"""
-        def signal_handler(signum, frame):
+        def signal_handler(signum, _frame):
             signal_name = signal.Signals(signum).name
             self.logger.warning(f"接收到信号 {signal_name}，准备优雅关闭...")
             self._shutdown()

@@ -181,8 +181,9 @@ class SQLiteStorage:
         except Exception as e:
             self.logger.warning(f"枚举交易日目录失败: {e}，返回空列表")
             return []
-    
-    def _init_tick_table(self, conn) -> None:
+
+    @staticmethod
+    def _init_tick_table(conn) -> None:
         """
         初始化Tick表结构（45个字段，PascalCase命名）
         
@@ -281,8 +282,9 @@ class SQLiteStorage:
             conn.execute("PRAGMA journal_mode=WAL")
             conn.execute("PRAGMA synchronous=NORMAL")
             conn.execute("PRAGMA cache_size=10000")
-    
-    def _init_kline_table(self, conn) -> None:
+
+    @staticmethod
+    def _init_kline_table(conn) -> None:
         """
         初始化K线表结构（精简版，包含13个核心字段，PascalCase命名）
         
@@ -531,7 +533,7 @@ class SQLiteStorage:
                     conn = sqlite3.connect(str(db_path), timeout=30.0, check_same_thread=False)
                     try:
                         # 初始化表（如果是新数据库）
-                        self._init_tick_table(conn)
+                        self._init_tick_table()
                         
                         # 写入数据
                         group_df.to_sql('ticks', conn, if_exists='append', index=False)
@@ -605,7 +607,7 @@ class SQLiteStorage:
                     conn = sqlite3.connect(str(db_path), timeout=30.0, check_same_thread=False)
                     try:
                         # 初始化表（如果是新数据库）
-                        self._init_kline_table(conn)
+                        self._init_kline_table()
                         
                         # 写入数据
                         group_df.to_sql('klines', conn, if_exists='append', index=False)

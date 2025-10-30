@@ -126,7 +126,7 @@ class DataCompressor:
         current_time = now.time()
         
         # 在压缩时间后的1小时内都可以执行压缩
-        if current_time >= compress_time and current_time < time(self.compress_hour + 1, 0):
+        if compress_time <= current_time < time(self.compress_hour + 1, 0):
             return True
         
         return False

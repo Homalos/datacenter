@@ -18,7 +18,7 @@ from src.core.event_bus import EventBus
 from src.utils.log import get_logger
 
 
-class TradingDayManager:
+class TradingDayManager(object):
     """
     交易日管理器
     
@@ -98,4 +98,3 @@ class TradingDayManager:
         """
         with self._lock:
             return self._trading_day is not None
-

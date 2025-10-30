@@ -297,14 +297,14 @@ class PartitionedCSVWriter:
             # 计算线程索引
             thread_idx = self._hash_instrument(instrument_id)
             
-            # 🔥 改进：队列满时降级处理
+            # 改进：队列满时降级处理
             try:
                 self.queues[thread_idx].put(
                     (instrument_id, group_df, trading_day),
                     timeout=5.0  # 5秒超时
                 )
             except queue.Full:
-                # 🔥 降级策略：直接写文件（绕过队列，保证数据不丢失）
+                # 降级策略：直接写文件（绕过队列，保证数据不丢失）
                 self.logger.error(
                     f"队列{thread_idx}已满，降级为直接写入：{instrument_id}，{len(group_df)}条"
                 )

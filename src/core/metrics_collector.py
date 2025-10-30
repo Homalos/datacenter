@@ -172,11 +172,12 @@ class MetricsCollector:
         Args:
             event: Tick事件
         """
+        self.logger.debug(f"Tick事件回调: {event.event_type}")
         try:
             self.tick_count += 1
             self.tick_timestamps.append(time.time())
-        except Exception:
-            pass
+        except Exception as e:
+            self.logger.exception(f"记录Tick接收统计失败: {e}", exc_info=True)
     
     def _on_bar(self, event: Event) -> None:
         """
@@ -185,11 +186,12 @@ class MetricsCollector:
         Args:
             event: K线事件
         """
+        self.logger.debug(f"K线事件回调: {event.event_type}")
         try:
             self.bar_count += 1
             self.bar_timestamps.append(time.time())
-        except Exception:
-            pass
+        except Exception as e:
+            self.logger.exception(f"记录K线生成统计失败: {e}", exc_info=True)
     
     def record_api_request(self) -> None:
         """记录API请求"""

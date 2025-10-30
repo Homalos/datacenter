@@ -114,7 +114,7 @@ class BarGenerator:
             bar_hour_slot = self._get_hour_slot(bar_time)
             return current_hour_slot != bar_hour_slot
         
-        elif self.interval == '1d':
+        elif self.interval == Interval.DAY.value:
             # 日线：按交易日对齐
             return tick.trading_day != self.current_bar.trading_day
         
@@ -255,8 +255,9 @@ class BarGenerator:
             return dt.replace(hour=9, minute=0, second=0, microsecond=0)
         
         return dt
-    
-    def _parse_interval(self, interval: str) -> int:
+
+    @staticmethod
+    def _parse_interval(interval: str) -> int:
         """
         解析周期参数，转换为分钟数
         
@@ -270,7 +271,7 @@ class BarGenerator:
             return int(interval[:-1])
         elif interval.endswith('h'):
             return int(interval[:-1]) * 60
-        elif interval == '1d':
+        elif interval == Interval.DAY.value:
             return 24 * 60
         else:
             raise ValueError(f"不支持的K线周期: {interval}")
@@ -306,9 +307,9 @@ class MultiBarGenerator:
         
         for interval in intervals:
             # 使用闭包捕获interval变量
-            def create_callback(intv: str) -> Callable:
+            def create_callback(inter: str) -> Callable:
                 def callback(bar: BarData) -> None:
-                    self._on_bar_completed(bar, intv)
+                    self._on_bar_completed(bar, inter)
                 return callback
             
             self.generators[interval] = BarGenerator(

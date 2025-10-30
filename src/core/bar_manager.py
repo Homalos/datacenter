@@ -17,6 +17,7 @@ from src.core.event_bus import EventBus
 from src.core.event import Event, EventType
 from src.core.object import TickData, BarData
 from src.core.pack_payload import PackPayload
+from src.system_config import Config
 from src.utils.log import get_logger
 
 
@@ -45,7 +46,7 @@ class BarManager:
         """
         self.event_bus = event_bus
         self.storage = storage
-        self.intervals = intervals or ["1m", "5m", "15m", "30m", "1h", "1d"]
+        self.intervals = intervals or Config.bar_intervals
         self.logger = get_logger(self.__class__.__name__)
         
         # 每个合约对应一个MultiBarGenerator
@@ -180,8 +181,9 @@ class BarManager:
         
         except Exception as e:
             self.logger.error(f"保存K线数据失败: {e}", exc_info=True)
-    
-    def _bar_to_dataframe(self, bar: BarData, interval: str) -> pd.DataFrame:
+
+    @staticmethod
+    def _bar_to_dataframe(bar: BarData, interval: str) -> pd.DataFrame:
         """
         将BarData转换为DataFrame（精简版，包含13个核心字段，PascalCase命名）
         
@@ -264,4 +266,3 @@ class BarManager:
             "intervals": self.intervals,
             "contracts": list(self.generators.keys())
         }
-

@@ -220,8 +220,7 @@ class ContractManager:
         """
         try:
             payload = event.payload
-            trading_day = "未知"
-            
+
             if payload and payload.get("code") == 0:
                 # 登录成功，提取trading_day
                 trading_day = payload.get("data", {}).get("TradingDay", "未知")
@@ -275,9 +274,8 @@ class ContractManager:
             if instrument_id in self.contracts:
                 self.contracts[instrument_id].last_tick_time = tick.update_time
         
-        except Exception:
-            # Tick事件处理失败不记录日志，避免日志过多
-            pass
+        except Exception as e:
+            self.logger.error(f"处理Tick事件失败: {e}", exc_info=True)
     
     def subscribe_all(self) -> None:
         """订阅全部合约"""
@@ -381,4 +379,3 @@ class ContractManager:
             contract for contract in self.contracts.values()
             if contract.exchange_id == exchange_id
         ]
-
