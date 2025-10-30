@@ -114,12 +114,12 @@ class AlarmScheduler:
             self.tasks[name].enabled = False
             self.logger.info(f"禁用闹钟任务: {name}")
     
-    def _on_timer(self, event: Event) -> None:
+    def _on_timer(self, _event: Event) -> None:
         """
         定时器事件回调 - 检查是否有任务需要触发
         
         Args:
-            event: 定时器事件
+            _event: 定时器事件
         """
         # 如果已停止，不再处理事件
         if self._stopped:
@@ -127,7 +127,6 @@ class AlarmScheduler:
         
         try:
             now = datetime.now()
-            current_time = now.time()
             current_date = now.strftime("%Y-%m-%d")
             
             # 遍历所有任务，检查是否需要触发
@@ -137,7 +136,7 @@ class AlarmScheduler:
                 
                 # 检查是否匹配任何时间点
                 for time_point in task.time_points:
-                    if self._is_time_match(current_time, time_point):
+                    if self._is_time_match(now.time(), time_point):
                         # 检查今天是否已经触发过
                         if task.last_trigger_date == current_date:
                             continue
@@ -150,8 +149,9 @@ class AlarmScheduler:
         
         except Exception as e:
             self.logger.error(f"定时器事件处理失败: {e}", exc_info=True)
-    
-    def _is_time_match(self, current: time, target: time) -> bool:
+
+    @staticmethod
+    def _is_time_match(current: time, target: time) -> bool:
         """
         检查当前时间是否匹配目标时间（精确到分钟）
         

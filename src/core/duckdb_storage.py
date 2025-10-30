@@ -440,6 +440,7 @@ class DuckDBSingleFileWriter:
                 
                 # 按InstrumentID分组（已排序，高效）
                 for instrument_id, group_df in merged_df.groupby('InstrumentID', sort=False):
+                    instrument_id: str
                     # 4.1 生成表名和创建SQL
                     if self.data_type == 'ticks':
                         create_sql = create_tick_table_sql(instrument_id)
@@ -682,7 +683,7 @@ class DuckDBQueryEngine:
         
         # 打开连接（只读模式）
         conn = duckdb.connect(str(db_file), read_only=True)
-        
+        table_name: str = ""
         try:
             # 接查询合约表（天然物理隔离，极速查询）
             if self.data_type == 'ticks':
@@ -721,7 +722,7 @@ class DuckDBQueryEngine:
                             trading_days: List[str],
                             instrument_id: str,
                             start_dt: datetime,
-                            end_dt: datetime) -> pd.DataFrame:
+                            end_dt: datetime) -> Optional[pd.DataFrame]:
         """
         跨日查询（ATTACH多库）
         

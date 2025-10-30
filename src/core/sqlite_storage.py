@@ -533,7 +533,7 @@ class SQLiteStorage:
                     conn = sqlite3.connect(str(db_path), timeout=30.0, check_same_thread=False)
                     try:
                         # 初始化表（如果是新数据库）
-                        self._init_tick_table()
+                        self._init_tick_table(conn)
                         
                         # 写入数据
                         group_df.to_sql('ticks', conn, if_exists='append', index=False)
@@ -607,7 +607,7 @@ class SQLiteStorage:
                     conn = sqlite3.connect(str(db_path), timeout=30.0, check_same_thread=False)
                     try:
                         # 初始化表（如果是新数据库）
-                        self._init_kline_table()
+                        self._init_kline_table(conn)
                         
                         # 写入数据
                         group_df.to_sql('klines', conn, if_exists='append', index=False)
