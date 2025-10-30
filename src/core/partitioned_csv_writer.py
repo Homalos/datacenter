@@ -294,6 +294,7 @@ class PartitionedCSVWriter:
         
         # 按合约分组
         for instrument_id, group_df in df.groupby("InstrumentID"):
+            instrument_id: str  # 类型注解
             # 计算线程索引
             thread_idx = self._hash_instrument(instrument_id)
             
