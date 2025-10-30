@@ -94,14 +94,15 @@ class DataStorage:
         date_dir.mkdir(parents=True, exist_ok=True)
         return date_dir / f"{symbol}.csv"
 
-    def save_ticks(self, symbol: str, df: pd.DataFrame, date: Optional[str] = None):
+    def _save_data(self, symbol: str, df: pd.DataFrame, date: Optional[str], data_type: str):
         """
-        保存 Tick 数据到CSV格式（追加写入，高性能）
+        通用数据保存方法 - 追加写入CSV格式
         
         Args:
             symbol: 合约代码
             df: 数据DataFrame
             date: 日期（YYYYMMDD），默认今天
+            data_type: 数据类型名称（用于日志显示，如 "Tick" 或 "K线"）
             
         Note:
             - 使用追加写入模式（mode='a'）
@@ -130,11 +131,22 @@ class DataStorage:
                     index=False
                 )
                 
-                self.logger.debug(f"✓ 成功追加 {len(df)} 条Tick到 {file_path.name}")
+                self.logger.debug(f"✓ 成功追加 {len(df)} 条{data_type}到 {file_path.name}")
                 
             except Exception as e:
-                self.logger.error(f"追加写入Tick数据失败 [{symbol}]: {e}", exc_info=True)
+                self.logger.error(f"追加写入{data_type}数据失败 [{symbol}]: {e}", exc_info=True)
                 raise
+
+    def save_ticks(self, symbol: str, df: pd.DataFrame, date: Optional[str] = None):
+        """
+        保存 Tick 数据到CSV格式（追加写入，高性能）
+        
+        Args:
+            symbol: 合约代码
+            df: 数据DataFrame
+            date: 日期（YYYYMMDD），默认今天
+        """
+        self._save_data(symbol, df, date, data_type="Tick")
 
     def save_kline(self, symbol: str, df: pd.DataFrame, date: Optional[str] = None):
         """
@@ -144,39 +156,8 @@ class DataStorage:
             symbol: 合约代码（含周期，如 a2511_1m）
             df: 数据DataFrame
             date: 日期（YYYYMMDD），默认今天
-            
-        Note:
-            - 使用追加写入模式（mode='a'）
-            - 通过文件锁防止并发冲突
-            - 不进行去重和排序（定期批量处理）
         """
-        if df.empty:
-            self.logger.warning(f"尝试保存空DataFrame [{symbol}]，已跳过")
-            return
-            
-        file_path = self._get_file_path(symbol, date)
-        
-        # 获取文件锁（防止并发写入冲突）
-        file_lock = self._get_file_lock(file_path)
-        
-        with file_lock:
-            try:
-                # 检查文件是否存在（决定是否写入表头）
-                file_exists = file_path.exists() and file_path.stat().st_size > 0
-                
-                # 追加写入（原子操作，无需临时文件）
-                df.to_csv(
-                    file_path,
-                    mode='a',           # 追加模式
-                    header=not file_exists,  # 文件不存在时写表头
-                    index=False
-                )
-                
-                self.logger.debug(f"✓ 成功追加 {len(df)} 条K线到 {file_path.name}")
-                
-            except Exception as e:
-                self.logger.error(f"追加写入K线数据失败 [{symbol}]: {e}", exc_info=True)
-                raise
+        self._save_data(symbol, df, date, data_type="K线")
     
     def deduplicate_and_sort_file(self, file_path: Path) -> bool:
         """
@@ -242,11 +223,18 @@ class DataStorage:
                     temp_path.unlink()
                 return False
 
-    def load_ticks(self, symbol: str, start_date: Optional[str] = None, end_date: Optional[str] = None) -> pd.DataFrame:
+    def _load_data_by_date_range(
+        self,
+        base_path: Path,
+        symbol: str,
+        start_date: Optional[str] = None,
+        end_date: Optional[str] = None
+    ) -> pd.DataFrame:
         """
-        加载 Tick 数据（从CSV.GZ日期文件夹）
+        通用数据加载方法 - 按日期范围加载CSV数据
         
         Args:
+            base_path: 数据根目录路径
             symbol: 合约代码
             start_date: 开始日期（YYYYMMDD），默认今天
             end_date: 结束日期（YYYYMMDD），默认今天
@@ -254,8 +242,6 @@ class DataStorage:
         Returns:
             合并后的DataFrame
         """
-        base_path = Path(settings.TICK_PATH)
-        
         if not base_path.exists():
             return pd.DataFrame()
         
@@ -275,7 +261,6 @@ class DataStorage:
             
             date_str = date_folder.name
             if start_date and end_date and start_date <= date_str <= end_date:
-                # data/csv/ticks/{date}/{symbol}.csv（未压缩）
                 symbol_file = date_folder / f"{symbol}.csv"
                 if symbol_file.exists() and symbol_file.stat().st_size > 0:
                     try:
@@ -294,9 +279,9 @@ class DataStorage:
         
         return combined
 
-    def load_kline(self, symbol: str, start_date: Optional[str] = None, end_date: Optional[str] = None) -> pd.DataFrame:
+    def load_ticks(self, symbol: str, start_date: Optional[str] = None, end_date: Optional[str] = None) -> pd.DataFrame:
         """
-        加载 K线 数据（从CSV.GZ日期文件夹）
+        加载 Tick 数据（从CSV日期文件夹）
         
         Args:
             symbol: 合约代码
@@ -306,45 +291,31 @@ class DataStorage:
         Returns:
             合并后的DataFrame
         """
-        base_path = Path(settings.KLINE_PATH)
+        return self._load_data_by_date_range(
+            base_path=Path(settings.TICK_PATH),
+            symbol=symbol,
+            start_date=start_date,
+            end_date=end_date
+        )
+
+    def load_kline(self, symbol: str, start_date: Optional[str] = None, end_date: Optional[str] = None) -> pd.DataFrame:
+        """
+        加载 K线 数据（从CSV日期文件夹）
         
-        if not base_path.exists():
-            return pd.DataFrame()
+        Args:
+            symbol: 合约代码
+            start_date: 开始日期（YYYYMMDD），默认今天
+            end_date: 结束日期（YYYYMMDD），默认今天
         
-        # 如果未指定日期，使用今天
-        if start_date is None and end_date is None:
-            start_date = end_date = datetime.now().strftime("%Y%m%d")
-        elif start_date is None:
-            start_date = end_date if end_date else datetime.now().strftime("%Y%m%d")
-        elif end_date is None:
-            end_date = start_date
-        
-        # 收集所有日期文件夹中的该symbol数据
-        dfs = []
-        for date_folder in sorted(base_path.iterdir()):
-            if not date_folder.is_dir():
-                continue
-            
-            date_str = date_folder.name
-            if start_date and end_date and start_date <= date_str <= end_date:
-                # data/csv/klines/{date}/{symbol}.csv（未压缩）
-                symbol_file = date_folder / f"{symbol}.csv"
-                if symbol_file.exists() and symbol_file.stat().st_size > 0:
-                    try:
-                        df = pd.read_csv(symbol_file)
-                        dfs.append(df)
-                    except Exception as e:
-                        self.logger.error(f"读取{symbol_file}失败: {e}")
-        
-        if not dfs:
-            return pd.DataFrame()
-        
-        # 合并所有数据
-        combined = pd.concat(dfs, ignore_index=True)
-        combined['datetime'] = pd.to_datetime(combined['datetime'])
-        combined = combined.sort_values('datetime').reset_index(drop=True)
-        
-        return combined
+        Returns:
+            合并后的DataFrame
+        """
+        return self._load_data_by_date_range(
+            base_path=Path(settings.KLINE_PATH),
+            symbol=symbol,
+            start_date=start_date,
+            end_date=end_date
+        )
 
     def query_kline(self, symbol: str, start_time: str, end_time: str) -> pd.DataFrame:
         """
@@ -444,6 +415,7 @@ class DataStorage:
             f"({len(csv_files)}个文件, {total_size_mb:.2f}MB)"
         )
         
+        temp_archive = None
         try:
             # 创建tar.gz压缩包
             temp_archive = archive_path.with_suffix('.tar.gz.tmp')
@@ -474,7 +446,7 @@ class DataStorage:
         except Exception as e:
             self.logger.error(f"压缩文件夹失败 [{trading_day}]: {e}", exc_info=True)
             # 清理临时文件
-            if temp_archive.exists():
+            if temp_archive and temp_archive.exists():
                 temp_archive.unlink()
             return False
     

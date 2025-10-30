@@ -9,7 +9,7 @@
 @Software   : PyCharm
 @Description: 数据归档器 - 定期将SQLite中的旧数据归档到Parquet
 """
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, date as DateType
 from typing import Optional
 
 import pandas as pd
@@ -178,10 +178,11 @@ class DataArchiver:
             for instrument_id, group in df.groupby("instrument_id"):
                 # 按日期分组保存
                 for date, date_group in group.groupby(group["datetime"].dt.date):
+                    date: DateType  # 类型注解
                     date_str = date.strftime("%Y%m%d")
                     
                     # 保存到Parquet
-                    self.parquet_storage.save_tick(
+                    self.parquet_storage.save_ticks(
                         symbol=str(instrument_id),
                         df=date_group,
                         date=date_str
@@ -224,6 +225,7 @@ class DataArchiver:
             for (instrument_id, interval), group in df.groupby(["instrument_id", "interval"]):
                 # 按日期分组保存
                 for date, date_group in group.groupby(group["datetime"].dt.date):
+                    date: DateType  # 类型注解
                     date_str = date.strftime("%Y%m%d")
                     symbol_with_interval = f"{instrument_id}_{interval}"
                     
@@ -246,12 +248,12 @@ class DataArchiver:
         
         return count
     
-    def _on_timer(self, event: Event) -> None:
+    def _on_timer(self, _event: Event) -> None:
         """
         定时器事件回调 - 检查是否需要执行归档
         
         Args:
-            event: 定时器事件
+            _event: 定时器事件
         """
         try:
             # 检查当前时间是否为凌晨2:00
