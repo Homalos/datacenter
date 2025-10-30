@@ -69,9 +69,9 @@ class ServiceState:
     
     def to_dict(self) -> dict:
         """转换为字典"""
-        data = asdict(self)
+        data = asdict(self)  # type: ignore
         if self.modules:
-            data['modules'] = {k: asdict(v) for k, v in self.modules.items()}
+            data['modules'] = {k: asdict(v) for k, v in self.modules.items()}  # type: ignore
         return data
 
 
@@ -385,8 +385,8 @@ class DataCenterService:
                         # 清理：取消订阅登录事件（避免内存泄漏）
                         self.event_bus.unsubscribe(EventType.MD_GATEWAY_LOGIN, on_login)
                 
-                except Exception as e:
-                    self._add_log("ERROR", f"行情网关启动失败: {e}")
+                except Exception as err:
+                    self._add_log("ERROR", f"行情网关启动失败: {err}")
                     raise
             
             self.starter.register_module(
@@ -458,8 +458,8 @@ class DataCenterService:
                         # 清理：取消订阅
                         self.event_bus.unsubscribe(EventType.TD_GATEWAY_LOGIN, on_td_login)
                 
-                except Exception as e:
-                    self._add_log("WARNING", f"交易网关启动失败: {e}，将使用系统日期")
+                except Exception as err:
+                    self._add_log("WARNING", f"交易网关启动失败: {err}，将使用系统日期")
                     # 不抛出异常，允许系统继续运行（使用系统日期作为fallback）
             
             self.starter.register_module(

@@ -357,4 +357,3 @@ class DataCenterStarter:
             "startup_order": self.startup_order,
             "module_states": self.get_module_status()
         }
-
