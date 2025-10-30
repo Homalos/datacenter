@@ -161,20 +161,20 @@ class HybridStorage:
         self.logger.info(f"定时刷新线程已启动，间隔: {self.flush_interval}秒")
     
     def _flush_worker(self) -> None:
-        """定时刷新工作线程（🔥 增加健康检查）"""
+        """定时刷新工作线程（增加健康检查）"""
         last_flush_time = time.time()
-        last_health_check = time.time()  # 🔥 新增
+        last_health_check = time.time()  # 新增
         
         while not self._stop_flush.is_set():
             try:
                 current_time = time.time()
                 
-                # 🔥 新增：定期健康检查（每5分钟）
-                if current_time - last_health_check >= 300:
+                # 新增：定期健康检查（每5分钟）
+                if current_time - last_health_check >= 300.0:
                     try:
                         health = self.get_health_metrics()
                         self.logger.info(
-                            f"📊 系统健康检查：{health['health_status']} | "
+                            f"系统健康检查：{health['health_status']} | "
                             f"线程: {health['threads']['total_active']} "
                             f"(工作线程: {health['threads']['worker_count']}) | "
                             f"DuckDB缓冲: Tick={health['duckdb']['tick_buffered']} "
@@ -397,9 +397,10 @@ class HybridStorage:
                 if tick.trading_day and tick.update_time:
                     try:
                         timestamp_val = pd.to_datetime(f"{tick.trading_day} {tick.update_time}.{tick.update_millisec:03d}")
-                    except Exception:
+                    except Exception as e:
                         # 回退到秒级精度
                         timestamp_val = pd.to_datetime(f"{tick.trading_day} {tick.update_time}")
+                        self.logger.warning(f"无法将Tick时间转换为完整datetime: {e}")
                 
                 # 按用户指定的47个字段顺序（PascalCase命名）
                 tick_dict = {
@@ -711,8 +712,9 @@ class HybridStorage:
                 "tick_buffer_usage_pct": round(buffer_usage, 2)
             }
         }
-    
-    def _evaluate_health(self, threads: int, duckdb_buf: int, 
+
+    @staticmethod
+    def _evaluate_health(threads: int, duckdb_buf: int,
                          csv_queue: int, buffer_pct: float) -> str:
         """
         评估系统健康状态

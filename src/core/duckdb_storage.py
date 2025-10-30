@@ -13,6 +13,7 @@ import re
 import duckdb
 import pandas as pd
 import threading
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Dict, List, Optional
 from datetime import datetime, timedelta
@@ -213,11 +214,19 @@ class DuckDBSingleFileWriter:
         self.submit_count = 0  # 提交计数器，用于定期触发监控
         self.monitor_interval = Config.duckdb_monitor_interval  # 从配置读取
         
+        # 🔥 线程池：限制最大并发刷新线程数，避免线程爆炸
+        self.executor = ThreadPoolExecutor(
+            max_workers=4,  # 最多4个并发刷新线程（通常1天只需1个，但允许多日并发）
+            thread_name_prefix="DuckDB-Pool"
+        )
+        self._future_counter = 0  # Future计数器，用于生成唯一任务ID
+        self._future_lock = threading.Lock()
+        
         # 分表架构：不再需要单一建表SQL，在写入时动态生成
         
         self.logger.info(
-            f"DuckDB写入器已初始化（按合约分表 + 文件锁保护）：路径={db_path}，"
-            f"批量阈值={batch_threshold}，类型={data_type}"
+            f"DuckDB写入器已初始化（按合约分表 + 文件锁保护 + 线程池）：路径={db_path}，"
+            f"批量阈值={batch_threshold}，类型={data_type}，线程池大小=4"
         )
     
     def submit_batch(self, df: pd.DataFrame) -> None:
@@ -242,21 +251,21 @@ class DuckDBSingleFileWriter:
         if missing_columns:
             raise ValueError(f"DataFrame缺少必要列：{missing_columns}")
         
-        # 定期监控线程（每10次提交检查一次）
+        # 定期监控线程池（每10次提交检查一次）
         self.submit_count += 1
         if self.submit_count % self.monitor_interval == 0:
             try:
                 stats = self._monitor_and_cleanup_threads()
-                if stats['zombie_threads'] > 0 or stats['flush_threads'] > 20:
+                if stats['zombie_tasks'] > 0 or stats['pool_threads'] > 10:
                     self.logger.warning(
-                        f"线程监控：总线程={stats['total_threads']}，"
-                        f"刷新线程={stats['flush_threads']}，"
-                        f"僵尸线程={stats['zombie_threads']}，"
-                        f"跟踪线程={stats['active_tracked']}，"
+                        f"线程池监控：总线程={stats['total_threads']}，"
+                        f"线程池线程={stats['pool_threads']}，"
+                        f"僵尸任务={stats['zombie_tasks']}，"
+                        f"活跃任务={stats['active_tracked']}，"
                         f"已清理={stats['cleaned']}"
                     )
             except Exception as e:
-                self.logger.error(f"线程监控失败：{e}")
+                self.logger.error(f"线程池监控失败：{e}")
         
         # 在锁内追加数据并判断是否刷新
         with self.buffer_lock:
@@ -272,31 +281,26 @@ class DuckDBSingleFileWriter:
                 
                 # 达到阈值时刷新
                 if total_rows >= self.batch_threshold:
-                    # 检查当前DuckDB刷新线程数量（防止线程泄漏）
-                    flush_threads = [
-                        t for t in threading.enumerate() 
-                        if t.name.startswith("DuckDB-Flush-")
-                    ]
-                    if len(flush_threads) > 10:
-                        self.logger.warning(
-                            f"DuckDB刷新线程数量过多：{len(flush_threads)}个，"
-                            f"可能存在线程阻塞或泄漏"
-                        )
-                    
-                    # 关键改进：在锁内pop数据，然后启动后台线程异步刷新
+                    # 🔥 关键改进：在锁内pop数据，然后提交到线程池异步刷新
                     dfs_to_flush = self.daily_buffer.pop(day_key)
                     
-                    # 启动后台线程（在锁内，但Thread.start()很快<1ms）
-                    threading.Thread(
-                        target=self._flush_day_async,
-                        args=(day_key, dfs_to_flush),
-                        name=f"DuckDB-Flush-{day_key}",
-                        daemon=True
-                    ).start()
+                    # 生成唯一任务ID
+                    with self._future_lock:
+                        self._future_counter += 1
+                        task_id = f"{day_key}-{self._future_counter}"
+                    
+                    # 🔥 提交到线程池（线程池自动限制并发数）
+                    self.executor.submit(self._flush_day_async, day_key, dfs_to_flush, task_id)
+                    
+                    # 获取线程池状态
+                    pool_threads = [
+                        t for t in threading.enumerate() 
+                        if t.name.startswith("DuckDB-Pool")
+                    ]
                     
                     self.logger.info(
-                        f"DuckDB达到批量阈值，启动后台线程刷新：{day_key}，{total_rows}条 "
-                        f"(当前活动线程: {len(flush_threads)+1})"
+                        f"✓ DuckDB达到批量阈值，提交到线程池：{day_key}，{total_rows}条 "
+                        f"(任务ID={task_id}，线程池线程数={len(pool_threads)})"
                     )
     
     def _get_file_lock(self, trading_day: str) -> threading.Lock:
@@ -319,76 +323,71 @@ class DuckDBSingleFileWriter:
     
     def _monitor_and_cleanup_threads(self) -> Dict:
         """
-        监控并清理僵尸线程
+        监控并清理僵尸任务
         
         Returns:
             {
                 'total_threads': int,  # 总线程数
-                'flush_threads': int,  # DuckDB刷新线程数
-                'zombie_threads': int,  # 僵尸线程数
-                'cleaned': int  # 已清理的线程数
+                'pool_threads': int,  # 线程池线程数
+                'zombie_tasks': int,  # 僵尸任务数
+                'cleaned': int  # 已清理的任务数
             }
         """
         import time
         current_time = time.time()
         
-        # 获取所有DuckDB刷新线程
+        # 获取所有线程池线程
         all_threads = threading.enumerate()
-        flush_threads = [t for t in all_threads if t.name.startswith("DuckDB-Flush-")]
+        pool_threads = [t for t in all_threads if t.name.startswith("DuckDB-Pool")]
         
-        zombie_threads = []
+        zombie_tasks = []
         cleaned_count = 0
         
-        # 检查跟踪的线程
+        # 检查跟踪的任务
         with self.thread_track_lock:
-            for thread_name, info in list(self.active_threads.items()):
-                thread_age = current_time - info['start_time']
+            for task_id, info in list(self.active_threads.items()):
+                task_age = current_time - info['start_time']
                 
-                # 检查线程是否还存活
-                thread_alive = any(t.name == thread_name for t in all_threads)
-                
-                if not thread_alive:
-                    # 线程已完成，从跟踪中移除
-                    del self.active_threads[thread_name]
-                    cleaned_count += 1
-                elif thread_age > self.max_thread_lifetime:
-                    # 超时线程，视为僵尸线程
-                    zombie_threads.append({
-                        'name': thread_name,
-                        'age': thread_age,
+                # 超时任务，视为僵尸任务
+                if task_age > self.max_thread_lifetime:
+                    zombie_tasks.append({
+                        'task_id': task_id,
+                        'age': task_age,
                         'trading_day': info['trading_day'],
-                        'row_count': info['row_count']
+                        'row_count': info['row_count'],
+                        'thread_name': info.get('thread_name', 'unknown')
                     })
                     self.logger.error(
-                        f"🧟 检测到僵尸线程：{thread_name}，"
-                        f"已运行{thread_age:.1f}秒（超时阈值{self.max_thread_lifetime}秒），"
+                        f"🧟 检测到僵尸任务：{task_id}（线程={info.get('thread_name', 'unknown')}），"
+                        f"已运行{task_age:.1f}秒（超时阈值{self.max_thread_lifetime}秒），"
                         f"交易日={info['trading_day']}，数据量={info['row_count']}条"
                     )
         
         # 记录警告
-        if zombie_threads:
+        if zombie_tasks:
             self.logger.warning(
-                f"发现{len(zombie_threads)}个僵尸线程，"
-                f"总刷新线程数={len(flush_threads)}"
+                f"发现{len(zombie_tasks)}个僵尸任务，"
+                f"线程池线程数={len(pool_threads)}"
             )
         
         return {
             'total_threads': len(all_threads),
-            'flush_threads': len(flush_threads),
-            'zombie_threads': len(zombie_threads),
+            'pool_threads': len(pool_threads),
+            'zombie_tasks': len(zombie_tasks),
             'cleaned': cleaned_count,
             'active_tracked': len(self.active_threads)
         }
     
-    def _flush_day_async(self, trading_day: str, dfs: List[pd.DataFrame]) -> None:
+    def _flush_day_async(self, trading_day: str, dfs: List[pd.DataFrame], task_id: str) -> None:
         """
-        异步刷新单日数据到DuckDB文件（在后台线程执行）
+        异步刷新单日数据到DuckDB文件（在线程池中执行）
         
         Args:
             trading_day: 交易日期（格式：YYYYMMDD）
             dfs: 待刷新的DataFrame列表
+            task_id: 任务ID（用于跟踪）
         
-        关键：此方法在后台线程执行，不持buffer_lock，不阻塞新数据追加
+        关键：此方法在线程池中执行，不持buffer_lock，不阻塞新数据追加
         
         实现要点：
         1. 合并该日的所有批次数据
@@ -407,12 +406,13 @@ class DuckDBSingleFileWriter:
         merged_df = pd.concat(dfs, ignore_index=True)
         row_count = len(merged_df)
         
-        # 注册到线程跟踪
+        # 注册到线程跟踪（使用task_id作为唯一标识）
         with self.thread_track_lock:
-            self.active_threads[thread_name] = {
+            self.active_threads[task_id] = {
                 'start_time': start_time,
                 'trading_day': trading_day,
-                'row_count': row_count
+                'row_count': row_count,
+                'thread_name': thread_name
             }
         
         # 2. 排序（保证时间序列连续性）
@@ -476,8 +476,11 @@ class DuckDBSingleFileWriter:
                 # 回滚事务
                 try:
                     conn.execute("ROLLBACK")
-                except Exception:
-                    pass
+                except Exception as rollback_e:
+                    self.logger.exception(
+                        f"DuckDB异步写入失败（回滚失败）：{rollback_e}",
+                        exc_info=True
+                    )
                 
                 self.logger.error(
                     f"DuckDB异步写入失败 [{trading_day}]：{e}",
@@ -494,11 +497,11 @@ class DuckDBSingleFileWriter:
                 end_time = time.time()
                 elapsed = end_time - start_time
                 with self.thread_track_lock:
-                    if thread_name in self.active_threads:
-                        del self.active_threads[thread_name]
+                    if task_id in self.active_threads:
+                        del self.active_threads[task_id]
                 
                 self.logger.debug(
-                    f"线程{thread_name}完成，耗时{elapsed:.2f}秒，"
+                    f"线程池任务{task_id}完成（{thread_name}），耗时{elapsed:.2f}秒，"
                     f"数据量={row_count}条"
                 )
     
@@ -507,11 +510,11 @@ class DuckDBSingleFileWriter:
         停止写入器，刷新所有剩余数据
         
         Args:
-            timeout: 等待后台刷新线程完成的超时时间（秒）
+            timeout: 等待线程池完成的超时时间（秒）
         """
         self.logger.info(f"正在停止DuckDB写入器 ({self.data_type})...")
         
-        # 1. 刷新所有剩余缓冲区（同步刷新，避免启动新线程）
+        # 1. 刷新所有剩余缓冲区（同步刷新，不提交到线程池）
         with self.buffer_lock:
             days_to_flush = list(self.daily_buffer.keys())
         
@@ -521,61 +524,38 @@ class DuckDBSingleFileWriter:
                     dfs = self.daily_buffer.pop(day)
                     if dfs:
                         self.logger.info(f"刷新剩余数据：{day}，{sum(len(d) for d in dfs)}条")
-                        # 同步刷新（优雅关闭时不启动新线程）
+                        # 同步刷新（优雅关闭时不启动新任务）
                         self._flush_day_sync(day, dfs)
         
-        # 2. 等待所有后台线程完成
-        import time
-        start_wait = time.time()
+        # 2. 关闭线程池，等待所有正在执行的任务完成
+        self.logger.info(f"关闭线程池，等待所有任务完成（超时={timeout}秒）...")
+        self.executor.shutdown(wait=True, cancel_futures=False)  # wait=True 会等待所有任务完成
         
-        # 监控后台刷新线程
-        while time.time() - start_wait < timeout:
-            flush_threads = [
-                t for t in threading.enumerate() 
-                if t.name.startswith("DuckDB-Flush-")
-            ]
-            if not flush_threads:
-                break
-            
-            # 详细日志：显示线程名称
-            thread_names = [t.name for t in flush_threads[:5]]  # 只显示前5个
-            self.logger.info(
-                f"等待{len(flush_threads)}个后台刷新线程完成... "
-                f"示例：{thread_names}"
-            )
-            time.sleep(0.5)
-        
-        # 检查是否仍有线程
-        remaining_threads = [
-            t for t in threading.enumerate() 
-            if t.name.startswith("DuckDB-Flush-")
-        ]
-        if remaining_threads:
-            self.logger.warning(
-                f"仍有{len(remaining_threads)}个后台线程未完成：{[t.name for t in remaining_threads]}"
-            )
-        
-        # 强制清理跟踪的僵尸线程
+        # 3. 检查是否还有未完成的任务
         with self.thread_track_lock:
             if self.active_threads:
                 zombie_count = len(self.active_threads)
-                zombie_names = list(self.active_threads.keys())[:5]  # 显示前5个
+                zombie_tasks = list(self.active_threads.keys())[:5]  # 显示前5个
                 self.logger.warning(
-                    f"🧟 强制清理{zombie_count}个僵尸线程：{zombie_names}"
+                    f"🧟 仍有{zombie_count}个未完成任务：{zombie_tasks}"
                 )
                 self.active_threads.clear()
+            else:
+                self.logger.info("✓ 所有刷新任务已完成")
         
         self.logger.info(f"✓ DuckDB写入器已停止 ({self.data_type})")
     
     def _flush_day_sync(self, trading_day: str, dfs: List[pd.DataFrame]) -> None:
         """
-        同步刷新（stop时使用，避免启动新线程）
+        同步刷新（stop时使用，直接在当前线程执行）
         
         Args:
             trading_day: 交易日期
             dfs: 待刷新的DataFrame列表
         """
-        self._flush_day_async(trading_day, dfs)
+        # 生成同步任务ID
+        task_id = f"{trading_day}-sync"
+        self._flush_day_async(trading_day, dfs, task_id)
     
     def get_stats(self) -> Dict:
         """
@@ -684,7 +664,7 @@ class DuckDBQueryEngine:
                          trading_day: str,
                          instrument_id: str,
                          start_dt: datetime,
-                         end_dt: datetime) -> pd.DataFrame:
+                         end_dt: datetime) -> Optional[pd.DataFrame]:
         """
         单日查询（最快路径）
         
