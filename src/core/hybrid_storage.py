@@ -23,6 +23,7 @@ from src.core.event import Event, EventType
 from src.core.event_bus import EventBus
 from src.core.object import TickData
 from src.core.partitioned_csv_writer import PartitionedCSVWriter
+from src.system_config import Config
 from src.utils.log import get_logger
 
 
@@ -49,10 +50,10 @@ class HybridStorage:
                  parquet_tick_path: str = "data/csv/ticks",
                  parquet_kline_path: str = "data/csv/klines",
                  retention_days: int = 7,
-                 flush_interval: int = 60,
-                 max_buffer_size: int = 100000,
-                 buffer_warning_threshold: float = 0.7,  # 警告阈值（70%）
-                 buffer_flush_threshold: float = 0.8,  # 提前刷新阈值（85%）
+                 flush_interval: Optional[int] = None,  # 🔥 从配置文件读取
+                 max_buffer_size: Optional[int] = None,  # 🔥 从配置文件读取
+                 buffer_warning_threshold: Optional[float] = None,  # 🔥 从配置文件读取
+                 buffer_flush_threshold: Optional[float] = None,  # 🔥 从配置文件读取
                  trading_day_manager = None):
         """
         初始化混合存储
@@ -62,41 +63,49 @@ class HybridStorage:
             parquet_tick_path: Tick CSV文件路径
             parquet_kline_path: K线 CSV文件路径
             retention_days: SQLite数据保留天数
-            flush_interval: 定时刷新间隔（秒），默认60秒（1分钟）
-            max_buffer_size: 缓冲区上限，默认10000条（防止内存爆炸）
-            buffer_warning_threshold: 警告阈值（0.7 = 70%）
-            buffer_flush_threshold: 提前刷新阈值（0.85 = 85%）
+            flush_interval: 定时刷新间隔（秒），None时从配置文件读取
+            max_buffer_size: 缓冲区上限，None时从配置文件读取
+            buffer_warning_threshold: 警告阈值，None时从配置文件读取
+            buffer_flush_threshold: 提前刷新阈值，None时从配置文件读取
             trading_day_manager: 交易日管理器
         """
         self.logger = get_logger(self.__class__.__name__)
         
-        # 🔥 DuckDB存储层（极速查询引擎）- 大幅提高批量阈值减少IO
+        # 🔥 从配置文件读取参数（如果未显式传入）
+        flush_interval = flush_interval if flush_interval is not None else Config.storage_flush_interval
+        max_buffer_size = max_buffer_size if max_buffer_size is not None else Config.storage_max_buffer_size
+        buffer_warning_threshold = buffer_warning_threshold if buffer_warning_threshold is not None else Config.storage_buffer_warning_threshold
+        buffer_flush_threshold = buffer_flush_threshold if buffer_flush_threshold is not None else Config.storage_buffer_flush_threshold
+        
+        # 🔥 DuckDB存储层（极速查询引擎）- 从配置文件读取批量阈值
         self.duckdb_tick_writer = DuckDBSingleFileWriter(
             db_path="data/duckdb/ticks",
-            batch_threshold=100000,  # 10万条触发写入（减少IO频率）
+            batch_threshold=Config.duckdb_tick_batch_threshold,  # 🔥 从配置读取
             data_type="ticks",
             trading_day_manager=trading_day_manager
         )
         
         self.duckdb_kline_writer = DuckDBSingleFileWriter(
             db_path="data/duckdb/klines",
-            batch_threshold=50000,  # 🔥 5万条触发写入（从20000提高到50000）
+            batch_threshold=Config.duckdb_kline_batch_threshold,  # 🔥 从配置读取
             data_type="klines",
             trading_day_manager=trading_day_manager
         )
         
-        # 🔥 CSV多线程写入器（高吞吐归档）- 大幅提高批量阈值减少IO
+        # 🔥 CSV多线程写入器（高吞吐归档）- 从配置文件读取批量阈值
         self.csv_tick_writer = PartitionedCSVWriter(
             base_path=parquet_tick_path,
-            num_threads=4,
-            batch_threshold=100000,  # 🔥 每线程10万条触发写入（从50000提高到100000）
+            num_threads=Config.csv_num_threads,  # 🔥 从配置读取
+            batch_threshold=Config.csv_tick_batch_threshold,  # 🔥 从配置读取
+            queue_max_size=Config.csv_queue_max_size,  # 🔥 从配置读取
             trading_day_manager=trading_day_manager
         )
         
         self.csv_kline_writer = PartitionedCSVWriter(
             base_path=parquet_kline_path,
-            num_threads=4,
-            batch_threshold=50000,  # 🔥 每线程5万条触发写入（从10000提高到50000）
+            num_threads=Config.csv_num_threads,  # 🔥 从配置读取
+            batch_threshold=Config.csv_kline_batch_threshold,  # 🔥 从配置读取
+            queue_max_size=Config.csv_queue_max_size,  # 🔥 从配置读取
             trading_day_manager=trading_day_manager
         )
         
@@ -107,8 +116,8 @@ class HybridStorage:
         self.buffer_flush_threshold = buffer_flush_threshold
         
         # 计算实际阈值（条数）
-        self._warning_size = int(max_buffer_size * buffer_warning_threshold)  # 7000条
-        self._flush_size = int(max_buffer_size * buffer_flush_threshold)      # 8500条
+        self._warning_size = int(max_buffer_size * buffer_warning_threshold)
+        self._flush_size = int(max_buffer_size * buffer_flush_threshold)
         
         # 缓冲区锁（保护并发访问，防止数据丢失）
         self._buffer_lock = threading.Lock()
@@ -300,7 +309,7 @@ class HybridStorage:
                     self._flush_tick_buffer_locked()
                     return
                 
-                # ⚠️ 警告（70%）：缓冲区使用率偏高（仅记录日志，每1000条打印一次）
+                # 警告（70%）：缓冲区使用率偏高（仅记录日志，每1000条打印一次）
                 if buffer_size >= self._warning_size:
                     if self._tick_recv_count % 1000 == 0:
                         buffer_usage = buffer_size / self.max_buffer_size * 100
@@ -494,15 +503,15 @@ class HybridStorage:
         try:
             self.logger.info(f"  → 双层写入 {len(df)} 条Tick...")
             
-            # 🔥 排序（为DuckDB优化，保证物理连续性）
+            # 排序（为DuckDB优化，保证物理连续性）
             # 这是性能的关键！排序后DuckDB的Zone Maps可以精确裁剪
             df = df.sort_values(by=['InstrumentID', 'Timestamp']).reset_index(drop=True)
             
-            # 🔥 1. 写入DuckDB（极速查询）
+            # 1. 写入DuckDB（极速查询）
             self.duckdb_tick_writer.submit_batch(df)
             self.logger.info("  ✓ DuckDB写入队列提交成功")
             
-            # 🔥 2. 写入CSV（多线程归档）
+            # 2. 写入CSV（多线程归档）
             self.csv_tick_writer.submit_batch(df)
             self.logger.info("  ✓ CSV多线程写入队列提交成功")
             
@@ -521,7 +530,7 @@ class HybridStorage:
     
     def save_klines(self, df: pd.DataFrame) -> None:
         """
-        保存K线数据（🔥 双层存储：DuckDB极速查询 + CSV多线程归档）
+        保存K线数据（双层存储：DuckDB极速查询 + CSV多线程归档）
         
         Args:
             df: K线数据DataFrame（包含核心字段，PascalCase命名）
@@ -538,14 +547,14 @@ class HybridStorage:
             
             self.logger.debug(f"  → 双层写入 {len(df)} 条K线...")
             
-            # 🔥 排序（为DuckDB优化）
+            # 排序（为DuckDB优化）
             df = df.sort_values(by=['InstrumentID', 'Timestamp']).reset_index(drop=True)
             
-            # 🔥 1. 写入DuckDB（极速查询）
+            # 1. 写入DuckDB（极速查询）
             self.duckdb_kline_writer.submit_batch(df)
             self.logger.debug("  ✓ DuckDB K线写入队列提交成功")
             
-            # 🔥 2. 写入CSV（多线程归档）
+            # 2. 写入CSV（多线程归档）
             self.csv_kline_writer.submit_batch(df)
             self.logger.debug("  ✓ CSV K线多线程写入队列提交成功")
         
@@ -557,7 +566,7 @@ class HybridStorage:
                     start_time: str,
                     end_time: str) -> pd.DataFrame:
         """
-        查询Tick数据（🔥 TODO: 需要实现DuckDB查询引擎）
+        查询Tick数据（TODO: 需要实现DuckDB查询引擎）
         
         Args:
             instrument_id: 合约代码
@@ -583,7 +592,7 @@ class HybridStorage:
                      start_time: str,
                      end_time: str) -> pd.DataFrame:
         """
-        查询K线数据（🔥 TODO: 需要实现DuckDB查询引擎）
+        查询K线数据（TODO: 需要实现DuckDB查询引擎）
         
         Args:
             instrument_id: 合约代码
@@ -606,7 +615,7 @@ class HybridStorage:
     
     def get_statistics(self) -> dict:
         """
-        获取存储统计信息（🔥 新架构：DuckDB + CSV）
+        获取存储统计信息（新架构：DuckDB + CSV）
         
         Returns:
             统计信息字典
@@ -632,7 +641,7 @@ class HybridStorage:
     
     def get_health_metrics(self) -> dict:
         """
-        获取系统健康指标（🔥 新增监控）
+        获取系统健康指标（新增监控）
         
         Returns:
             健康指标字典，包含：
@@ -717,7 +726,7 @@ class HybridStorage:
         Returns:
             健康状态字符串
         """
-        # 🔴 严重
+        # 严重
         if threads > 100:
             return "🔴 CRITICAL: 线程数过多"
         if duckdb_buf > 200000:
@@ -727,7 +736,7 @@ class HybridStorage:
         if buffer_pct > 90:
             return "🔴 CRITICAL: Tick缓冲区接近满载"
         
-        # 🟡 警告
+        # 警告
         if threads > 50:
             return "🟡 WARNING: 线程数偏高"
         if duckdb_buf > 100000:
@@ -737,6 +746,6 @@ class HybridStorage:
         if buffer_pct > 70:
             return "🟡 WARNING: Tick缓冲区使用率偏高"
         
-        # ✅ 健康
+        # 健康
         return "✅ HEALTHY"
 

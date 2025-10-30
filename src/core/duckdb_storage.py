@@ -18,6 +18,7 @@ from typing import Dict, List, Optional
 from datetime import datetime, timedelta
 from collections import defaultdict
 
+from src.system_config import Config
 from src.utils.log import get_logger
 from src.core.trading_day_manager import TradingDayManager
 
@@ -135,22 +136,27 @@ def create_kline_table_sql(instrument_id: str) -> str:
     
     Returns:
         CREATE TABLE SQL语句
+    
+    Note:
+        字段定义与 bar_manager.py 的 _bar_to_dataframe 完全一致（13个字段）
     """
     table_name = f"kline_{normalize_instrument_id(instrument_id)}"
     
     return f"""
     CREATE TABLE IF NOT EXISTS {table_name} (
-        TradingDay DATE,
+        BarType VARCHAR,
+        TradingDay VARCHAR,
+        UpdateTime VARCHAR,
         InstrumentID VARCHAR,
-        Timestamp TIMESTAMP,
-        Period VARCHAR,
-        OpenPrice DOUBLE,
-        HighPrice DOUBLE,
-        LowPrice DOUBLE,
-        ClosePrice DOUBLE,
+        ExchangeID VARCHAR,
         Volume BIGINT,
-        Turnover DOUBLE,
-        OpenInterest BIGINT
+        OpenInterest BIGINT,
+        OpenPrice DOUBLE,
+        HighestPrice DOUBLE,
+        LowestPrice DOUBLE,
+        ClosePrice DOUBLE,
+        LastVolume BIGINT,
+        Timestamp TIMESTAMP
     )
     """
 
@@ -196,10 +202,21 @@ class DuckDBSingleFileWriter:
         self.daily_buffer: Dict[str, List[pd.DataFrame]] = defaultdict(list)
         self.buffer_lock = threading.Lock()
         
-        # 🔥 分表架构：不再需要单一建表SQL，在写入时动态生成
+        # 文件锁：防止多个线程同时写入同一个DuckDB文件
+        self.file_locks: Dict[str, threading.Lock] = {}
+        self.locks_lock = threading.Lock()
+        
+        # 线程跟踪：监控和清理僵尸线程（从配置文件读取参数）
+        self.active_threads: Dict[str, Dict] = {}  # {thread_name: {start_time, trading_day, row_count}}
+        self.thread_track_lock = threading.Lock()
+        self.max_thread_lifetime = Config.duckdb_max_thread_lifetime  # 从配置读取
+        self.submit_count = 0  # 提交计数器，用于定期触发监控
+        self.monitor_interval = Config.duckdb_monitor_interval  # 从配置读取
+        
+        # 分表架构：不再需要单一建表SQL，在写入时动态生成
         
         self.logger.info(
-            f"DuckDB写入器已初始化（🔥按合约分表）：路径={db_path}，"
+            f"DuckDB写入器已初始化（按合约分表 + 文件锁保护）：路径={db_path}，"
             f"批量阈值={batch_threshold}，类型={data_type}"
         )
     
@@ -207,7 +224,7 @@ class DuckDBSingleFileWriter:
         """
         提交一批数据（自动按交易日分组）
         
-        🔥 改进：在锁内提取数据，后台线程异步刷新（避免持锁阻塞）
+        改进：在锁内提取数据，后台线程异步刷新（避免持锁阻塞）
         
         Args:
             df: 数据DataFrame（必须包含TradingDay和InstrumentID列）
@@ -225,7 +242,23 @@ class DuckDBSingleFileWriter:
         if missing_columns:
             raise ValueError(f"DataFrame缺少必要列：{missing_columns}")
         
-        # 🔥 在锁内追加数据并判断是否刷新
+        # 定期监控线程（每10次提交检查一次）
+        self.submit_count += 1
+        if self.submit_count % self.monitor_interval == 0:
+            try:
+                stats = self._monitor_and_cleanup_threads()
+                if stats['zombie_threads'] > 0 or stats['flush_threads'] > 20:
+                    self.logger.warning(
+                        f"线程监控：总线程={stats['total_threads']}，"
+                        f"刷新线程={stats['flush_threads']}，"
+                        f"僵尸线程={stats['zombie_threads']}，"
+                        f"跟踪线程={stats['active_tracked']}，"
+                        f"已清理={stats['cleaned']}"
+                    )
+            except Exception as e:
+                self.logger.error(f"线程监控失败：{e}")
+        
+        # 在锁内追加数据并判断是否刷新
         with self.buffer_lock:
             for trading_day, group_df in df.groupby('TradingDay'):
                 # 转换日期格式（支持YYYY-MM-DD或YYYYMMDD）
@@ -239,7 +272,18 @@ class DuckDBSingleFileWriter:
                 
                 # 达到阈值时刷新
                 if total_rows >= self.batch_threshold:
-                    # 🔥 关键改进：在锁内pop数据，然后启动后台线程异步刷新
+                    # 检查当前DuckDB刷新线程数量（防止线程泄漏）
+                    flush_threads = [
+                        t for t in threading.enumerate() 
+                        if t.name.startswith("DuckDB-Flush-")
+                    ]
+                    if len(flush_threads) > 10:
+                        self.logger.warning(
+                            f"DuckDB刷新线程数量过多：{len(flush_threads)}个，"
+                            f"可能存在线程阻塞或泄漏"
+                        )
+                    
+                    # 关键改进：在锁内pop数据，然后启动后台线程异步刷新
                     dfs_to_flush = self.daily_buffer.pop(day_key)
                     
                     # 启动后台线程（在锁内，但Thread.start()很快<1ms）
@@ -251,8 +295,90 @@ class DuckDBSingleFileWriter:
                     ).start()
                     
                     self.logger.info(
-                        f"🔥 DuckDB达到批量阈值，启动后台线程刷新：{day_key}，{total_rows}条"
+                        f"DuckDB达到批量阈值，启动后台线程刷新：{day_key}，{total_rows}条 "
+                        f"(当前活动线程: {len(flush_threads)+1})"
                     )
+    
+    def _get_file_lock(self, trading_day: str) -> threading.Lock:
+        """
+        获取指定交易日的文件锁（线程安全）
+        
+        Args:
+            trading_day: 交易日期（格式：YYYYMMDD）
+        
+        Returns:
+            该交易日对应的文件锁
+        
+        Note:
+            使用locks_lock保护file_locks字典的并发访问
+        """
+        with self.locks_lock:
+            if trading_day not in self.file_locks:
+                self.file_locks[trading_day] = threading.Lock()
+            return self.file_locks[trading_day]
+    
+    def _monitor_and_cleanup_threads(self) -> Dict:
+        """
+        监控并清理僵尸线程
+        
+        Returns:
+            {
+                'total_threads': int,  # 总线程数
+                'flush_threads': int,  # DuckDB刷新线程数
+                'zombie_threads': int,  # 僵尸线程数
+                'cleaned': int  # 已清理的线程数
+            }
+        """
+        import time
+        current_time = time.time()
+        
+        # 获取所有DuckDB刷新线程
+        all_threads = threading.enumerate()
+        flush_threads = [t for t in all_threads if t.name.startswith("DuckDB-Flush-")]
+        
+        zombie_threads = []
+        cleaned_count = 0
+        
+        # 检查跟踪的线程
+        with self.thread_track_lock:
+            for thread_name, info in list(self.active_threads.items()):
+                thread_age = current_time - info['start_time']
+                
+                # 检查线程是否还存活
+                thread_alive = any(t.name == thread_name for t in all_threads)
+                
+                if not thread_alive:
+                    # 线程已完成，从跟踪中移除
+                    del self.active_threads[thread_name]
+                    cleaned_count += 1
+                elif thread_age > self.max_thread_lifetime:
+                    # 超时线程，视为僵尸线程
+                    zombie_threads.append({
+                        'name': thread_name,
+                        'age': thread_age,
+                        'trading_day': info['trading_day'],
+                        'row_count': info['row_count']
+                    })
+                    self.logger.error(
+                        f"🧟 检测到僵尸线程：{thread_name}，"
+                        f"已运行{thread_age:.1f}秒（超时阈值{self.max_thread_lifetime}秒），"
+                        f"交易日={info['trading_day']}，数据量={info['row_count']}条"
+                    )
+        
+        # 记录警告
+        if zombie_threads:
+            self.logger.warning(
+                f"发现{len(zombie_threads)}个僵尸线程，"
+                f"总刷新线程数={len(flush_threads)}"
+            )
+        
+        return {
+            'total_threads': len(all_threads),
+            'flush_threads': len(flush_threads),
+            'zombie_threads': len(zombie_threads),
+            'cleaned': cleaned_count,
+            'active_tracked': len(self.active_threads)
+        }
     
     def _flush_day_async(self, trading_day: str, dfs: List[pd.DataFrame]) -> None:
         """
@@ -262,86 +388,119 @@ class DuckDBSingleFileWriter:
             trading_day: 交易日期（格式：YYYYMMDD）
             dfs: 待刷新的DataFrame列表
         
-        🔥 关键：此方法在后台线程执行，不持buffer_lock，不阻塞新数据追加
+        关键：此方法在后台线程执行，不持buffer_lock，不阻塞新数据追加
         
         实现要点：
         1. 合并该日的所有批次数据
-        2. 🔥 按InstrumentID, Timestamp排序（保证时间序列连续性）
+        2. 按InstrumentID, Timestamp排序（保证时间序列连续性）
         3. 创建或打开对应的.duckdb文件
-        4. 🔥 按合约分组，为每个合约创建独立的表
-        5. 🔥 每个合约的数据写入对应的表（天然物理连续！）
+        4. 按合约分组，为每个合约创建独立的表
+        5. 每个合约的数据写入对应的表（天然物理连续！）
         """
         if not dfs:
             return
         
+        # 记录线程开始
+        import time
+        thread_name = threading.current_thread().name
+        start_time = time.time()
         merged_df = pd.concat(dfs, ignore_index=True)
+        row_count = len(merged_df)
         
-        # 2. 🔥 排序（保证时间序列连续性）
+        # 注册到线程跟踪
+        with self.thread_track_lock:
+            self.active_threads[thread_name] = {
+                'start_time': start_time,
+                'trading_day': trading_day,
+                'row_count': row_count
+            }
+        
+        # 2. 排序（保证时间序列连续性）
         merged_df = merged_df.sort_values(
             by=['InstrumentID', 'Timestamp']
         ).reset_index(drop=True)
         
-        # 3. 打开DuckDB连接
+        # 3. 获取文件锁（防止并发写入同一个DuckDB文件）
+        file_lock = self._get_file_lock(trading_day)
         db_file = self.db_path / f"{trading_day}.duckdb"
-        conn = duckdb.connect(str(db_file))
         
-        try:
-            # 4. 🔥 按合约分组写入（每个合约一张表）
-            conn.execute("BEGIN TRANSACTION")
+        # 使用文件锁保护整个写入过程
+        with file_lock:
+            self.logger.debug(f"获取文件锁成功：{trading_day}，开始写入...")
             
-            contracts_written = []
-            total_rows = 0
+            # 打开DuckDB连接
+            conn = duckdb.connect(str(db_file))
             
-            # 按InstrumentID分组（已排序，高效）
-            for instrument_id, group_df in merged_df.groupby('InstrumentID', sort=False):
-                # 4.1 生成表名和创建SQL
-                if self.data_type == 'ticks':
-                    create_sql = create_tick_table_sql(instrument_id)
-                    table_name = f"tick_{normalize_instrument_id(instrument_id)}"
-                else:  # klines
-                    create_sql = create_kline_table_sql(instrument_id)
-                    table_name = f"kline_{normalize_instrument_id(instrument_id)}"
-                
-                # 4.2 创建表（如果不存在）
-                conn.execute(create_sql)
-                
-                # 4.3 注册DataFrame为临时表
-                conn.register('temp_df', group_df)
-                
-                # 4.4 批量插入
-                conn.execute(f"INSERT INTO {table_name} SELECT * FROM temp_df")
-                
-                # 4.5 取消注册
-                conn.unregister('temp_df')
-                
-                contracts_written.append(instrument_id)
-                total_rows += len(group_df)
-            
-            # 5. 提交事务
-            conn.execute("COMMIT")
-            
-            self.logger.info(
-                f"✓ DuckDB异步写入成功：{trading_day}，{total_rows}条，"
-                f"{len(contracts_written)}个合约 | "
-                f"示例：{contracts_written[:3]}"
-            )
-            
-        except Exception as e:
-            # 回滚事务
             try:
-                conn.execute("ROLLBACK")
-            except Exception:
-                pass
+                # 4. 按合约分组写入（每个合约一张表）
+                conn.execute("BEGIN TRANSACTION")
+                
+                contracts_written = []
+                total_rows = 0
+                
+                # 按InstrumentID分组（已排序，高效）
+                for instrument_id, group_df in merged_df.groupby('InstrumentID', sort=False):
+                    # 4.1 生成表名和创建SQL
+                    if self.data_type == 'ticks':
+                        create_sql = create_tick_table_sql(instrument_id)
+                        table_name = f"tick_{normalize_instrument_id(instrument_id)}"
+                    else:  # klines
+                        create_sql = create_kline_table_sql(instrument_id)
+                        table_name = f"kline_{normalize_instrument_id(instrument_id)}"
+                    
+                    # 4.2 创建表（如果不存在）
+                    conn.execute(create_sql)
+                    
+                    # 4.3 注册DataFrame为临时表
+                    conn.register('temp_df', group_df)
+                    
+                    # 4.4 批量插入
+                    conn.execute(f"INSERT INTO {table_name} SELECT * FROM temp_df")
+                    
+                    # 4.5 取消注册
+                    conn.unregister('temp_df')
+                    
+                    contracts_written.append(instrument_id)
+                    total_rows += len(group_df)
+                
+                # 5. 提交事务
+                conn.execute("COMMIT")
+                
+                self.logger.info(
+                    f"✓ DuckDB异步写入成功：{trading_day}，{total_rows}条，"
+                    f"{len(contracts_written)}个合约 | "
+                    f"示例(前5个合约)：{contracts_written[:5]}"
+                )
+                
+            except Exception as e:
+                # 回滚事务
+                try:
+                    conn.execute("ROLLBACK")
+                except Exception:
+                    pass
+                
+                self.logger.error(
+                    f"DuckDB异步写入失败 [{trading_day}]：{e}",
+                    exc_info=True
+                )
+                raise
             
-            self.logger.error(
-                f"DuckDB异步写入失败 [{trading_day}]：{e}",
-                exc_info=True
-            )
-            raise
-        
-        finally:
-            # 6. 关闭连接
-            conn.close()
+            finally:
+                # 6. 关闭连接
+                conn.close()
+                self.logger.debug(f"释放文件锁：{trading_day}，写入完成")
+                
+                # 记录线程结束，从跟踪中移除
+                end_time = time.time()
+                elapsed = end_time - start_time
+                with self.thread_track_lock:
+                    if thread_name in self.active_threads:
+                        del self.active_threads[thread_name]
+                
+                self.logger.debug(
+                    f"线程{thread_name}完成，耗时{elapsed:.2f}秒，"
+                    f"数据量={row_count}条"
+                )
     
     def stop(self, timeout: float = 30.0) -> None:
         """
@@ -368,6 +527,8 @@ class DuckDBSingleFileWriter:
         # 2. 等待所有后台线程完成
         import time
         start_wait = time.time()
+        
+        # 监控后台刷新线程
         while time.time() - start_wait < timeout:
             flush_threads = [
                 t for t in threading.enumerate() 
@@ -375,7 +536,13 @@ class DuckDBSingleFileWriter:
             ]
             if not flush_threads:
                 break
-            self.logger.info(f"等待{len(flush_threads)}个后台刷新线程完成...")
+            
+            # 详细日志：显示线程名称
+            thread_names = [t.name for t in flush_threads[:5]]  # 只显示前5个
+            self.logger.info(
+                f"等待{len(flush_threads)}个后台刷新线程完成... "
+                f"示例：{thread_names}"
+            )
             time.sleep(0.5)
         
         # 检查是否仍有线程
@@ -385,8 +552,18 @@ class DuckDBSingleFileWriter:
         ]
         if remaining_threads:
             self.logger.warning(
-                f"⚠️ 仍有{len(remaining_threads)}个后台线程未完成：{[t.name for t in remaining_threads]}"
+                f"仍有{len(remaining_threads)}个后台线程未完成：{[t.name for t in remaining_threads]}"
             )
+        
+        # 强制清理跟踪的僵尸线程
+        with self.thread_track_lock:
+            if self.active_threads:
+                zombie_count = len(self.active_threads)
+                zombie_names = list(self.active_threads.keys())[:5]  # 显示前5个
+                self.logger.warning(
+                    f"🧟 强制清理{zombie_count}个僵尸线程：{zombie_names}"
+                )
+                self.active_threads.clear()
         
         self.logger.info(f"✓ DuckDB写入器已停止 ({self.data_type})")
     
@@ -402,13 +579,14 @@ class DuckDBSingleFileWriter:
     
     def get_stats(self) -> Dict:
         """
-        获取写入器统计信息
+        获取写入器统计信息（强版：包含线程监控）
         
         Returns:
             {
                 'batch_threshold': int,
                 'buffer_sizes': Dict[str, int],  # {trading_day: buffer_size}
-                'total_buffered': int
+                'total_buffered': int,
+                'thread_stats': Dict  # 线程统计信息
             }
         """
         with self.buffer_lock:
@@ -416,12 +594,16 @@ class DuckDBSingleFileWriter:
                 day: sum(len(df) for df in dfs)
                 for day, dfs in self.daily_buffer.items()
             }
-            
-            return {
-                'batch_threshold': self.batch_threshold,
-                'buffer_sizes': buffer_sizes,
-                'total_buffered': sum(buffer_sizes.values())
-            }
+        
+        # 获取线程监控信息
+        thread_stats = self._monitor_and_cleanup_threads()
+        
+        return {
+            'batch_threshold': self.batch_threshold,
+            'buffer_sizes': buffer_sizes,
+            'total_buffered': sum(buffer_sizes.values()),
+            'thread_stats': thread_stats  # 新增
+        }
 
 
 class DuckDBQueryEngine:
@@ -522,7 +704,7 @@ class DuckDBQueryEngine:
         conn = duckdb.connect(str(db_file), read_only=True)
         
         try:
-            # 🔥 直接查询合约表（天然物理隔离，极速查询）
+            # 接查询合约表（天然物理隔离，极速查询）
             if self.data_type == 'ticks':
                 table_name = f"tick_{normalize_instrument_id(instrument_id)}"
             else:  # klines
@@ -590,7 +772,7 @@ class DuckDBQueryEngine:
                 conn.execute(f"ATTACH '{db_file}' AS db{i} (READ_ONLY)")
                 self.logger.debug(f"ATTACH数据库：db{i} <- {day}")
             
-            # 🔥 构建UNION ALL查询（查询各文件的合约表）
+            # 构建UNION ALL查询（查询各文件的合约表）
             if self.data_type == 'ticks':
                 table_name = f"tick_{normalize_instrument_id(instrument_id)}"
             else:  # klines

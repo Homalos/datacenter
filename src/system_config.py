@@ -91,8 +91,28 @@ class Config(object):
     ding_app_name: str = extra_config.get("ding_app_name", "")
     ding_address: str = extra_config.get("ding_address", "")
 
+    # ============================================================
+    #  数据中心存储配置（HybridStorage + DuckDB + CSV）
+    # ============================================================
+    
+    # Level 1: HybridStorage缓冲区配置
+    storage_flush_interval: int = extra_config.get("datacenter_storage.level1.flush_interval", 60)
+    storage_max_buffer_size: int = extra_config.get("datacenter_storage.level1.max_buffer_size", 100000)
+    storage_buffer_warning_threshold: float = extra_config.get("datacenter_storage.level1.buffer_warning_threshold", 0.7)
+    storage_buffer_flush_threshold: float = extra_config.get("datacenter_storage.level1.buffer_flush_threshold", 0.8)
+    
+    # Level 2: DuckDB存储配置
+    duckdb_tick_batch_threshold: int = extra_config.get("datacenter_storage.duckdb.tick_batch_threshold", 30000)
+    duckdb_kline_batch_threshold: int = extra_config.get("datacenter_storage.duckdb.kline_batch_threshold", 3000)
+    duckdb_max_thread_lifetime: int = extra_config.get("datacenter_storage.duckdb.max_thread_lifetime", 300)
+    duckdb_monitor_interval: int = extra_config.get("datacenter_storage.duckdb.monitor_interval", 10)
+    
+    # Level 2: CSV归档配置
+    csv_tick_batch_threshold: int = extra_config.get("datacenter_storage.csv.tick_batch_threshold", 30000)
+    csv_kline_batch_threshold: int = extra_config.get("datacenter_storage.csv.kline_batch_threshold", 3000)
+    csv_num_threads: int = extra_config.get("datacenter_storage.csv.num_threads", 4)
+    csv_queue_max_size: int = extra_config.get("datacenter_storage.csv.queue_max_size", 50000)
+
 
 # 为了向后兼容，创建别名
 DatacenterConfig = Config
-
-# print(SystemConfig.bar_intervals)
