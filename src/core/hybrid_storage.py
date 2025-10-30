@@ -12,6 +12,7 @@
 import threading
 import time
 from collections import deque
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime  # noqa: F401  (保留用于未来的查询功能)
 from typing import Optional
 
@@ -131,6 +132,12 @@ class HybridStorage:
         # 定时刷新线程
         self._flush_thread: Optional[threading.Thread] = None
         self._stop_flush = threading.Event()
+        
+        # 🔥 修复线程泄漏：使用线程池代替创建新线程
+        self._save_executor = ThreadPoolExecutor(
+            max_workers=2,  # 最多2个并发保存线程
+            thread_name_prefix="HybridStorage-Saver"
+        )
         
         # 启动定时刷新线程
         self._start_flush_thread()
@@ -252,6 +259,11 @@ class HybridStorage:
         self.csv_kline_writer.stop(timeout=30)
         self.logger.info("✓ CSV写入器已停止")
         
+        # 5. 🔥 关闭保存线程池
+        self.logger.info("关闭保存线程池...")
+        self._save_executor.shutdown(wait=True, timeout=30)
+        self.logger.info("✓ 保存线程池已关闭")
+        
         self.logger.info("✅ HybridStorage 已完全停止（双层存储已优雅关闭）")
     
     def _on_tick(self, event: Event) -> None:
@@ -358,13 +370,8 @@ class HybridStorage:
         
         self.logger.info(f"→ 准备刷新 {len(ticks_to_save)} 条Tick到存储层...")
         
-        # ===== 在后台线程执行保存（避免阻塞Tick接收）=====
-        threading.Thread(
-            target=self._do_save_ticks,
-            args=(ticks_to_save,),
-            name=f"TickSaver-{len(ticks_to_save)}",
-            daemon=True
-        ).start()
+        # ===== 使用线程池执行保存（避免阻塞Tick接收，避免线程泄漏）=====
+        self._save_executor.submit(self._do_save_ticks, ticks_to_save)
     
     def _flush_tick_buffer(self) -> None:
         """刷新 Tick 缓冲区到存储层（兼容旧接口，内部加锁）"""

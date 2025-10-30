@@ -109,6 +109,11 @@ class DataCenterService:
         self.alarm_scheduler: Optional[AlarmScheduler] = None
         self.metrics_collector: Optional[MetricsCollector] = None
         
+        # 交易网关状态标志（用于严格控制启动顺序）
+        self._td_login_status = False
+        self._td_confirm_status = False
+        self._contract_file_updated = False
+        
         # 日志收集器（用于Web界面展示）
         self._log_buffer: List[Dict[str, Any]] = []
         self._max_log_size = 1000
@@ -151,6 +156,54 @@ class DataCenterService:
                 callback(log_entry)
             except Exception as e:
                 self.logger.error(f"日志回调失败: {e}")
+    
+    def _handle_td_confirm(self, event: Event):
+        """
+        处理结算单确认事件
+        
+        Args:
+            event: TD_CONFIRM_SUCCESS 事件
+        """
+        data = event.payload
+        if data and data.get("code") == 0:
+            self._td_login_status = True
+            self._td_confirm_status = True
+            self.logger.info("✓ 结算单确认成功，交易网关完全就绪")
+            self._add_log("INFO", "✓ 结算单确认成功，交易网关完全就绪")
+            
+            # 发送查询合约事件，触发合约文件更新
+            if self.event_bus:
+                self.logger.info("发布查询合约事件，开始更新合约文件...")
+                self._add_log("INFO", "发布查询合约事件，开始更新合约文件...")
+                self.event_bus.publish(Event(
+                    event_type=EventType.DATA_CENTER_QRY_INS,
+                    payload={},
+                    source="DataCenterService"
+                ))
+        else:
+            self._td_login_status = False
+            self._td_confirm_status = False
+            error_msg = f"结算单确认失败: {data.get('message') if data else 'Unknown'}"
+            self.logger.error(error_msg)
+            self._add_log("ERROR", error_msg)
+    
+    def _handle_td_qry_ins(self, event: Event):
+        """
+        处理合约查询完成事件
+        
+        Args:
+            event: TD_QRY_INS 事件
+        """
+        data = event.payload
+        if data and data.get("code") == 0:
+            self._contract_file_updated = True
+            self.logger.info("✓ 合约文件更新完成")
+            self._add_log("INFO", "✓ 合约文件更新完成")
+        else:
+            self._contract_file_updated = False
+            error_msg = f"合约文件更新失败: {data.get('message') if data else 'Unknown'}"
+            self.logger.warning(error_msg)
+            self._add_log("WARNING", error_msg)
     
     def add_log_callback(self, callback: Callable):
         """添加日志回调（用于实时推送）"""
@@ -388,7 +441,7 @@ class DataCenterService:
             self.trader_gateway = TraderGateway(event_bus=self.event_bus)
             
             def start_trader_gateway(gateway):
-                """启动交易网关并登录（用于获取trading_day）"""
+                """启动交易网关并登录（用于获取trading_day和合约信息）"""
                 try:
                     broker_config = load_broker_config()
                     if not broker_config:
@@ -401,6 +454,14 @@ class DataCenterService:
                     # 创建登录完成事件
                     login_event = threading.Event()
                     login_success = [False]
+                    
+                    # 创建结算单确认完成事件
+                    confirm_event = threading.Event()
+                    confirm_success = [False]
+                    
+                    # 创建合约文件更新完成事件
+                    contract_update_event = threading.Event()
+                    contract_update_success = [False]
                     
                     def on_td_login(event: Event):
                         """监听 TD_GATEWAY_LOGIN 事件"""
@@ -418,30 +479,89 @@ class DataCenterService:
                         # 设置事件，结束等待
                         login_event.set()
                     
-                    # 订阅登录事件
+                    def on_td_confirm(event: Event):
+                        """监听 TD_CONFIRM_SUCCESS 事件"""
+                        payload = event.payload or {}
+                        if payload.get("code") == 0:
+                            self._add_log("INFO", "✓ 结算单确认成功，交易网关完全就绪")
+                            confirm_success[0] = True
+                            self._td_confirm_status = True
+                            
+                            # 🔥 关键步骤：发布查询合约事件，触发合约文件更新
+                            self._add_log("INFO", "发布查询合约事件，开始更新合约文件...")
+                            self.event_bus.publish(Event(
+                                event_type=EventType.DATA_CENTER_QRY_INS,
+                                payload={},
+                                source="DataCenterService"
+                            ))
+                        else:
+                            error_msg = payload.get("message", "未知错误")
+                            self._add_log("WARNING", f"✗ 结算单确认失败: {error_msg}")
+                            self._td_confirm_status = False
+                        
+                        confirm_event.set()
+                    
+                    def on_td_qry_ins(event: Event):
+                        """监听 TD_QRY_INS 事件（合约文件更新完成）"""
+                        payload = event.payload or {}
+                        if payload.get("code") == 0:
+                            self._add_log("INFO", "✓ 合约文件更新完成，可以开始订阅行情")
+                            contract_update_success[0] = True
+                        else:
+                            error_msg = payload.get("message", "未知错误")
+                            self._add_log("WARNING", f"✗ 合约文件更新失败: {error_msg}")
+                        
+                        contract_update_event.set()
+                    
+                    # 订阅事件（在连接前订阅，确保不会错过事件）
                     self.event_bus.subscribe(EventType.TD_GATEWAY_LOGIN, on_td_login)
+                    self.event_bus.subscribe(EventType.TD_CONFIRM_SUCCESS, on_td_confirm)
+                    self.event_bus.subscribe(EventType.TD_QRY_INS, on_td_qry_ins)
                     
                     try:
                         self._add_log("INFO", f"连接交易网关: {broker_name}...")
                         gateway.connect(config)
                         
-                        # 等待登录完成
-                        max_wait = 10
-                        if login_event.wait(timeout=max_wait):
-                            if login_success[0]:
-                                # 登录成功，TradingDayManager已接收到trading_day
-                                self._add_log("INFO", "✓ 交易网关已就绪，trading_day已更新")
+                        # 步骤1: 等待登录完成
+                        max_wait_login = 10
+                        self._add_log("INFO", "等待交易网关登录...")
+                        if login_event.wait(timeout=max_wait_login):
+                            if not login_success[0]:
+                                self._add_log("WARNING", "交易网关登录失败，将使用系统日期")
+                                return
+                        else:
+                            self._add_log("WARNING", f"交易网关登录超时（{max_wait_login}秒），将使用系统日期")
+                            return
+                        
+                        # 步骤2: 等待结算单确认
+                        max_wait_confirm = 10
+                        self._add_log("INFO", "等待结算单确认...")
+                        if confirm_event.wait(timeout=max_wait_confirm):
+                            if not confirm_success[0]:
+                                self._add_log("WARNING", "结算单确认失败，跳过合约文件更新")
+                                return
+                        else:
+                            self._add_log("WARNING", f"结算单确认超时（{max_wait_confirm}秒）")
+                            return
+                        
+                        # 步骤3: 等待合约文件更新完成
+                        max_wait_contract = 60  # 合约查询可能需要更长时间
+                        self._add_log("INFO", "等待合约文件更新...")
+                        if contract_update_event.wait(timeout=max_wait_contract):
+                            if contract_update_success[0]:
+                                self._add_log("INFO", "✓ 交易网关完全就绪，合约文件已更新")
+                                self._contract_file_updated = True
                                 time.sleep(0.5)  # 短暂等待，确保其他订阅者处理完毕
                             else:
-                                # 登录失败，使用系统日期作为fallback
-                                self._add_log("WARNING", "交易网关登录失败，将使用系统日期作为trading_day")
+                                self._add_log("WARNING", "合约文件更新失败")
                         else:
-                            # 超时
-                            self._add_log("WARNING", f"交易网关登录超时（{max_wait}秒），将使用系统日期")
+                            self._add_log("WARNING", f"合约文件更新超时（{max_wait_contract}秒）")
                     
                     finally:
                         # 清理：取消订阅
                         self.event_bus.unsubscribe(EventType.TD_GATEWAY_LOGIN, on_td_login)
+                        self.event_bus.unsubscribe(EventType.TD_CONFIRM_SUCCESS, on_td_confirm)
+                        self.event_bus.unsubscribe(EventType.TD_QRY_INS, on_td_qry_ins)
                 
                 except Exception as err:
                     self._add_log("WARNING", f"交易网关启动失败: {err}，将使用系统日期")

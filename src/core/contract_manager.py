@@ -77,6 +77,7 @@ class ContractManager:
         # 网关就绪状态管理
         self._md_gateway_ready = False      # 行情网关是否就绪
         self._td_gateway_ready = False      # 交易网关是否就绪（或超时）
+        self._contract_file_ready = False   # 合约文件是否已更新完成
         self._subscription_triggered = False  # 是否已触发订阅（防止重复）
         self._gateway_ready_lock = threading.Lock()
         
@@ -88,6 +89,9 @@ class ContractManager:
         
         # 订阅交易网关登录成功事件
         self.event_bus.subscribe(EventType.TD_GATEWAY_LOGIN, self._on_td_gateway_login)
+        
+        # 订阅合约文件更新完成事件（关键：只有在合约文件更新完成后才订阅行情）
+        self.event_bus.subscribe(EventType.TD_QRY_INS, self._on_contract_file_updated)
         
         # 订阅Tick事件，用于更新合约最后tick时间
         self.event_bus.subscribe(EventType.TICK, self._on_tick)
@@ -136,10 +140,12 @@ class ContractManager:
         启动智能超时检查线程
         
         策略：
-        - 每3秒检查一次交易网关状态
+        - 每3秒检查一次状态
         - 最长等待60秒
-        - 如果在60秒内成功登录，立即触发订阅
-        - 如果60秒后仍未登录，放弃等待并继续（使用系统日期）
+        - 如果在60秒内所有条件满足，立即触发订阅
+        - 如果60秒后仍有条件未满足，使用 fallback 并继续订阅：
+          * 交易网关未就绪 → 使用系统日期
+          * 合约文件未更新 → 使用现有合约列表
         """
         def timeout_worker():
             max_wait_time = 60  # 最长等待60秒
@@ -173,13 +179,23 @@ class ContractManager:
             
             # 超时：60秒后仍未就绪
             with self._gateway_ready_lock:
-                if not self._td_gateway_ready and not self._subscription_triggered:
-                    self.logger.warning(
-                        f"⚠️ 交易网关登录超时（{max_wait_time}秒），将使用系统日期继续订阅行情"
-                    )
-                    self._td_gateway_ready = True  # 标记为就绪（超时fallback）
+                if not self._subscription_triggered:
+                    # 标记所有未就绪的条件为就绪（超时fallback）
+                    if not self._td_gateway_ready:
+                        self.logger.warning(
+                            f"⚠️ 交易网关登录超时（{max_wait_time}秒），将使用系统日期继续订阅行情"
+                        )
+                        self._td_gateway_ready = True
+                    
+                    if not self._contract_file_ready:
+                        self.logger.warning(
+                            f"⚠️ 合约文件更新超时（{max_wait_time}秒），将使用现有合约列表继续订阅行情"
+                        )
+                        self._contract_file_ready = True
+                    
+                    # 检查是否可以开始订阅
                     self._check_and_subscribe()
-                elif self._subscription_triggered:
+                else:
                     self.logger.debug("订阅已触发，超时检查线程正常退出")
         
         timeout_thread = threading.Thread(
@@ -217,6 +233,9 @@ class ContractManager:
         
         Args:
             event: 登录事件
+        
+        Note:
+            仅标记交易网关就绪状态，等待合约文件更新完成后才触发订阅
         """
         try:
             payload = event.payload
@@ -226,30 +245,74 @@ class ContractManager:
                 trading_day = payload.get("data", {}).get("TradingDay", "未知")
                 
                 with self._gateway_ready_lock:
-                    self.logger.info(f"✓ 交易网关已就绪，交易日: {trading_day}")
+                    self.logger.info(f"✓ 交易网关登录成功，交易日: {trading_day}")
+                    self.logger.info("等待结算单确认和合约文件更新...")
                     self._td_gateway_ready = True
-                    self._check_and_subscribe()
+                    # 🔥 关键修改：不在此处调用 _check_and_subscribe()，等待 TD_QRY_INS 事件
             else:
                 # 登录失败，不影响行情订阅（使用系统日期fallback）
                 self.logger.warning("交易网关登录失败，将使用系统日期")
                 with self._gateway_ready_lock:
                     self._td_gateway_ready = True  # 标记为就绪（fallback）
-                    self._check_and_subscribe()
+                    # 🔥 关键修改：不在此处调用 _check_and_subscribe()，等待 TD_QRY_INS 事件
         
         except Exception as e:
             self.logger.error(f"处理交易网关登录事件失败: {e}", exc_info=True)
     
+    def _on_contract_file_updated(self, event: Event) -> None:
+        """
+        处理合约文件更新完成事件 - 触发订阅
+        
+        Args:
+            event: TD_QRY_INS 事件
+        
+        Note:
+            只有在合约文件更新完成（code=0）后才标记就绪并触发订阅
+        """
+        try:
+            payload = event.payload
+
+            if payload and payload.get("code") == 0:
+                # 合约文件更新成功
+                with self._gateway_ready_lock:
+                    self.logger.info("✓ 合约文件更新完成")
+                    self._contract_file_ready = True
+                    # 重新加载合约列表（确保使用最新的合约文件）
+                    self._load_contracts()
+                    self.logger.info(f"已重新加载合约列表，共 {len(self.contracts)} 个合约")
+                    # 检查是否可以开始订阅
+                    self._check_and_subscribe()
+            else:
+                # 合约文件更新失败，记录警告但仍然允许订阅（使用现有合约列表）
+                error_msg = payload.get("message", "未知错误") if payload else "未知错误"
+                self.logger.warning(f"合约文件更新失败: {error_msg}，将使用现有合约列表")
+                with self._gateway_ready_lock:
+                    self._contract_file_ready = True  # 标记为就绪（fallback）
+                    self._check_and_subscribe()
+        
+        except Exception as e:
+            self.logger.error(f"处理合约文件更新事件失败: {e}", exc_info=True)
+    
     def _check_and_subscribe(self) -> None:
         """
-        检查两个网关都就绪后触发订阅（需持有锁）
+        检查所有条件都满足后触发订阅（需持有锁）
         
         Note:
             此方法必须在持有 _gateway_ready_lock 的情况下调用
+            
+        条件：
+            1. 行情网关就绪 (_md_gateway_ready)
+            2. 交易网关就绪 (_td_gateway_ready)
+            3. 合约文件已更新 (_contract_file_ready)
+            4. 尚未触发订阅 (not _subscription_triggered)
         """
-        if self._md_gateway_ready and self._td_gateway_ready and not self._subscription_triggered:
+        if (self._md_gateway_ready and 
+            self._td_gateway_ready and 
+            self._contract_file_ready and 
+            not self._subscription_triggered):
             self._subscription_triggered = True  # 防止重复订阅
             self.logger.info("=" * 60)
-            self.logger.info("行情网关和交易网关都已就绪，开始订阅全部合约...")
+            self.logger.info("所有就绪条件已满足，开始订阅全部合约...")
             self.logger.info("=" * 60)
             self.subscribe_all()
     
