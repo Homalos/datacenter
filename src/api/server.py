@@ -64,7 +64,6 @@ def init_dependencies(**deps):
     
     新架构说明：
     - 新架构使用 datacenter_service 统一管理所有模块
-    - 此函数仅为兼容旧启动脚本保留，实际上已不再需要
     - 所有API接口已优化为直接使用 datacenter_service，不再依赖这些全局变量
     
     Args:
@@ -134,6 +133,64 @@ def health_check():
             pass
     
     return health_status
+
+
+@app.get("/about")
+def get_about_info():
+    """
+    获取关于信息 - 从配置文件动态加载
+    
+    Returns:
+        dict: 包含项目名称、描述、版本、技术栈等信息
+    """
+    try:
+        from config import Config
+        from src.utils.config_manager import ConfigManager
+        
+        # 加载数据中心配置
+        config_manager = ConfigManager(str(Config.data_center_filepath))
+        
+        # 获取基础配置
+        base_config = config_manager.get("base", {})
+        
+        # 提取关于信息
+        about_info = {
+            "name": base_config.get("name", "Homalos 数据中心"),
+            "description": base_config.get("description", "期货行情数据采集与管理系统"),
+            "version": base_config.get("version", "0.0.1"),
+            "author": base_config.get("author", "Unknown"),
+            "copyright": base_config.get("copyright", ""),
+            "contact": base_config.get("contact", ""),
+            "user_guide": base_config.get("user_guide", ""),
+            "timezone": base_config.get("timezone", "Asia/Shanghai"),
+            "technology_stack": base_config.get("technology_stack", [])
+        }
+        
+        return {
+            "success": True,
+            "data": about_info
+        }
+        
+    except Exception as e:
+        return {
+            "success": False,
+            "message": f"获取关于信息失败: {str(e)}",
+            "data": {
+                "name": "Homalos 数据中心",
+                "description": "期货行情数据采集与管理系统",
+                "version": "0.3.0",
+                "author": "Homalos Team",
+                "copyright": "Copyright © 2025 Homalos Team",
+                "contact": "",
+                "user_guide": "",
+                "timezone": "Asia/Shanghai",
+                "technology_stack": [
+                    "后端：Python 3.13 + FastAPI",
+                    "前端：Vue 3 + Naive UI + Vite",
+                    "数据库：DuckDB"
+                ]
+            }
+        }
 
 
 # ============================================================
@@ -414,6 +471,26 @@ def trigger_archive():
 @app.get("/dashboard", response_class=HTMLResponse)
 async def dashboard():
     """返回可视化仪表板页面（Vue 3 + TypeScript）"""
+    dashboard_file = Path(__file__).parent.parent.parent / "static" / "index.html"
+    
+    if not dashboard_file.exists():
+        raise HTTPException(status_code=404, detail="Dashboard页面不存在，请先执行: cd frontend && npm run build")
+    
+    with open(dashboard_file, 'r', encoding='utf-8') as f:
+        return f.read()
+
+
+@app.get("/dashboard/{full_path:path}", response_class=HTMLResponse)
+async def dashboard_spa_router(full_path: str):
+    """
+    SPA 路由支持 - 所有 /dashboard/* 路径返回 index.html
+    让 Vue Router 处理客户端路由
+    
+    这样可以支持：
+    - 直接访问子路由（如 /dashboard/about）
+    - 刷新页面不会 404
+    - 完整的 SPA 体验
+    """
     dashboard_file = Path(__file__).parent.parent.parent / "static" / "index.html"
     
     if not dashboard_file.exists():

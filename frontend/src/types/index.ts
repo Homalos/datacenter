@@ -47,3 +47,18 @@ export interface ApiResponse<T = any> {
 // 主题类型
 export type ThemeMode = 'light' | 'dark' | 'auto'
 
+// 关于信息
+export interface AboutInfo {
+  name: string
+  description: string
+  version: string
+  author: string
+  copyright: string
+  contact: string
+  user_guide: string
+  timezone: string
+  technology_stack: string[]
+  enable: boolean
+  debug: boolean
+}
+
