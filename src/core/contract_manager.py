@@ -442,3 +442,58 @@ class ContractManager:
             contract for contract in self.contracts.values()
             if contract.exchange_id == exchange_id
         ]
+    
+    def stop(self) -> None:
+        """
+        停止合约管理器（通过事件机制取消所有行情订阅）
+        
+        设计理念：
+        - 通过事件总线发布取消订阅请求
+        - 保持与启动时订阅机制的一致性
+        - 解耦合约管理和网关控制
+        """
+        self.logger.info("正在停止 ContractManager...")
+        
+        # 1. 通过事件机制取消所有行情订阅
+        subscribed_list = list(self.subscribed_symbols)
+        if subscribed_list:
+            self.logger.info(f"通过事件机制取消订阅 {len(subscribed_list)} 个合约...")
+            
+            try:
+                # 发布取消订阅事件（使用与订阅相同的事件机制）
+                unsubscribe_event = Event(
+                    EventType.MARKET_SUBSCRIBE_REQUEST,
+                    payload={
+                        "data": {
+                            "instruments": subscribed_list,
+                            "action": SubscribeAction.UNSUBSCRIBE.value
+                        }
+                    },
+                    source=self.__class__.__name__
+                )
+                
+                self.event_bus.publish(unsubscribe_event)
+                self.logger.info("✓ 已发布取消订阅事件，等待行情网关处理...")
+                
+                # 给网关一些时间处理取消订阅请求
+                import time
+                time.sleep(2)
+                
+                # 清空订阅列表
+                self.subscribed_symbols.clear()
+                self.logger.info("✓ 已清空本地订阅列表")
+                
+            except Exception as e:
+                self.logger.error(f"取消订阅失败: {e}", exc_info=True)
+        
+        # 2. 取消订阅事件总线
+        try:
+            self.event_bus.unsubscribe(EventType.MD_GATEWAY_LOGIN, self._on_md_gateway_login)
+            self.event_bus.unsubscribe(EventType.TD_GATEWAY_LOGIN, self._on_td_gateway_login)
+            self.event_bus.unsubscribe(EventType.TD_QRY_INS, self._on_contract_file_updated)
+            self.event_bus.unsubscribe(EventType.TICK, self._on_tick)
+            self.logger.info("✓ 已取消订阅所有事件")
+        except Exception as e:
+            self.logger.error(f"取消订阅事件总线失败: {e}")
+        
+        self.logger.info("✅ ContractManager 已完全停止")

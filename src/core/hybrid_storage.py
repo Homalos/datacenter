@@ -139,6 +139,9 @@ class HybridStorage:
             thread_name_prefix="HybridStorage-Saver"
         )
         
+        # 保存 EventBus 引用（用于 stop 时取消订阅）
+        self.event_bus = event_bus
+        
         # 启动定时刷新线程
         self._start_flush_thread()
         
@@ -224,12 +227,18 @@ class HybridStorage:
         停止混合存储（🔥 优雅关闭双层存储）
         
         关闭顺序：
+        0. 取消订阅 TICK 事件（停止接收新数据）
         1. 停止定时刷新线程
         2. 刷新剩余缓冲区
         3. 停止DuckDB写入器
         4. 停止CSV多线程写入器
         """
         self.logger.info("正在停止 HybridStorage...")
+        
+        # 0. 🔥 取消订阅 TICK 事件（停止接收新数据）
+        if self.event_bus:
+            self.event_bus.unsubscribe(EventType.TICK, self._on_tick)
+            self.logger.info("✓ 已取消订阅 TICK 事件，停止接收新数据")
         
         # 1. 停止定时刷新线程
         self._stop_flush.set()
@@ -261,7 +270,7 @@ class HybridStorage:
         
         # 5. 🔥 关闭保存线程池
         self.logger.info("关闭保存线程池...")
-        self._save_executor.shutdown(wait=True, timeout=30)
+        self._save_executor.shutdown(wait=True)  # Python 3.10 不支持 timeout 参数
         self.logger.info("✓ 保存线程池已关闭")
         
         self.logger.info("✅ HybridStorage 已完全停止（双层存储已优雅关闭）")
@@ -653,20 +662,37 @@ class HybridStorage:
         
         Returns:
             健康指标字典，包含：
-            - 后台线程数量
+            - 后台线程数量（仅数据中心相关线程）
             - DuckDB队列状态
             - CSV队列状态
             - 缓冲区使用率
         """
         import threading
         
-        # 1. 监控后台线程数量
-        active_threads = threading.active_count()
+        # 1. 监控后台线程数量（仅数据中心相关线程）
         thread_list = threading.enumerate()
         thread_names = [t.name for t in thread_list]
         
-        # 分类线程
-        worker_threads = [n for n in thread_names if "Worker" in n or "Saver" in n or "Flush" in n]
+        # ✅ 修复：只统计数据中心相关的线程，排除 Uvicorn/FastAPI 线程
+        datacenter_keywords = [
+            "Worker", "Saver", "Flush", "Pool", "DuckDB", "CSV",
+            "EventBus", "SyncLoop", "Timer", "HybridStorage"
+        ]
+        
+        datacenter_threads = []
+        worker_threads = []
+        
+        for name in thread_names:
+            # 检查是否是数据中心相关线程
+            for keyword in datacenter_keywords:
+                if keyword in name:
+                    datacenter_threads.append(name)
+                    # 同时检查是否是工作线程
+                    if any(k in name for k in ["Worker", "Saver", "Flush"]):
+                        worker_threads.append(name)
+                    break
+        
+        active_threads = len(datacenter_threads)  # ✅ 只统计数据中心线程
         
         # 2. 监控DuckDB队列
         duckdb_tick_stats = self.duckdb_tick_writer.get_stats()
@@ -727,7 +753,7 @@ class HybridStorage:
         评估系统健康状态
         
         Args:
-            threads: 活动线程数
+            threads: 数据中心线程数（不包括 Uvicorn/FastAPI）
             duckdb_buf: DuckDB缓冲区大小
             csv_queue: CSV队列大小
             buffer_pct: Tick缓冲区使用率（百分比）
@@ -735,9 +761,9 @@ class HybridStorage:
         Returns:
             健康状态字符串
         """
-        # 严重
-        if threads > 100:
-            return "🔴 CRITICAL: 线程数过多"
+        # 严重（✅ 更新阈值：只统计数据中心线程，正常应该在80个以内）
+        if threads > 150:
+            return "🔴 CRITICAL: 数据中心线程数过多"
         if duckdb_buf > 200000:
             return "🔴 CRITICAL: DuckDB队列严重积压"
         if csv_queue > 100000:
@@ -745,9 +771,9 @@ class HybridStorage:
         if buffer_pct > 90:
             return "🔴 CRITICAL: Tick缓冲区接近满载"
         
-        # 警告
-        if threads > 50:
-            return "🟡 WARNING: 线程数偏高"
+        # 警告（✅ 更新阈值：数据中心正常线程数约70个，>100为警告）
+        if threads > 100:
+            return "🟡 WARNING: 数据中心线程数偏高"
         if duckdb_buf > 100000:
             return "🟡 WARNING: DuckDB队列积压"
         if csv_queue > 50000:

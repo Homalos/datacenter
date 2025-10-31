@@ -630,7 +630,8 @@ class DataCenterService:
             self.starter.register_module(
                 name="ContractManager",
                 instance=self.contract_manager,
-                dependencies=["EventBus", "MarketGateway"]
+                dependencies=["EventBus", "MarketGateway"],
+                stop_func=lambda cm: cm.stop()  # ✅ 添加停止函数，确保取消订阅
             )
             self._update_module_status("ContractManager", "registered")
             
@@ -645,7 +646,8 @@ class DataCenterService:
             self.starter.register_module(
                 name="BarManager",
                 instance=self.bar_manager,
-                dependencies=["EventBus", "HybridStorage"]
+                dependencies=["EventBus", "HybridStorage"],
+                stop_func=lambda bm: bm.stop()  # ✅ 添加停止函数，确保取消订阅
             )
             self._update_module_status("BarManager", "registered")
             

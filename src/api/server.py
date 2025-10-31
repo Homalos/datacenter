@@ -144,11 +144,11 @@ def get_about_info():
         dict: 包含项目名称、描述、版本、技术栈等信息
     """
     try:
-        from config import Config
+        from src.system_config import Config
         from src.utils.config_manager import ConfigManager
         
         # 加载数据中心配置
-        config_manager = ConfigManager(str(Config.data_center_filepath))
+        config_manager = ConfigManager(str(Config.datacenter_config))
         
         # 获取基础配置
         base_config = config_manager.get("base", {})
@@ -163,7 +163,9 @@ def get_about_info():
             "contact": base_config.get("contact", ""),
             "user_guide": base_config.get("user_guide", ""),
             "timezone": base_config.get("timezone", "Asia/Shanghai"),
-            "technology_stack": base_config.get("technology_stack", [])
+            "technology_stack": base_config.get("technology_stack", []),
+            "enable": base_config.get("enable", True),
+            "debug": base_config.get("debug", False)
         }
         
         return {

@@ -280,3 +280,23 @@ class BarManager:
                 "intervals": self.intervals,
                 "contracts": list(self.generators.keys())
             }
+    
+    def stop(self) -> None:
+        """
+        停止 K线管理器（取消订阅事件）
+        
+        职责：
+        - 取消订阅 TICK 事件
+        - 停止接收新的 Tick 数据
+        - 清理资源
+        """
+        self.logger.info("正在停止 BarManager...")
+        
+        try:
+            # 取消订阅 TICK 事件
+            self.event_bus.unsubscribe(EventType.TICK, self._on_tick)
+            self.logger.info("✓ 已取消订阅 TICK 事件")
+        except Exception as e:
+            self.logger.error(f"取消订阅 TICK 事件失败: {e}")
+        
+        self.logger.info("✅ BarManager 已停止")

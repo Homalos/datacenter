@@ -37,7 +37,10 @@ def main():
         host=settings.API_HOST,
         port=settings.API_PORT,
         log_level="info",
-        reload=False  # 生产环境关闭自动重载
+        reload=False,  # 生产环境关闭自动重载
+        workers=1,  # ✅ 单进程模式，避免多进程导致的资源浪费
+        limit_concurrency=100,  # ✅ 限制最大并发连接数
+        timeout_keep_alive=5  # ✅ 减少 Keep-Alive 超时，释放空闲连接
     )
 
 
