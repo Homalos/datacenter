@@ -224,6 +224,7 @@ class RspCode(IntEnum):
     # 登录交易服务器模块 7xxx
     LOGIN_TD_SUCCESS = 0  # 登录成功
     LOGIN_TD_FAILED = 7001  # 登录失败
+    AUTH_TD_FAILED = 7002  # 认证失败
 
     # 结算单模块 8xxx
     SETTLEMENT_CONFIRM_SUCCESS = 0  # 确认结算单成功
@@ -243,6 +244,7 @@ class RspMsg(Enum):
     # 登录交易服务器模块 7xxx
     LOGIN_TD_SUCCESS = "登录交易服务器成功"  # 登录成功
     LOGIN_TD_FAILED = "登录交易服务器失败"  # 登录失败
+    AUTH_TD_FAILED = "交易服务器认证失败"  # 认证失败
 
     # 结算单模块 8xxx
     SETTLEMENT_CONFIRM_SUCCESS = "确认结算单成功"

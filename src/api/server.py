@@ -413,11 +413,11 @@ def trigger_archive():
 
 @app.get("/dashboard", response_class=HTMLResponse)
 async def dashboard():
-    """返回可视化仪表板页面"""
-    dashboard_file = Path(__file__).parent.parent.parent / "static" / "dashboard.html"
+    """返回可视化仪表板页面（Vue 3 + TypeScript）"""
+    dashboard_file = Path(__file__).parent.parent.parent / "static" / "index.html"
     
     if not dashboard_file.exists():
-        raise HTTPException(status_code=404, detail="Dashboard页面不存在")
+        raise HTTPException(status_code=404, detail="Dashboard页面不存在，请先执行: cd frontend && npm run build")
     
     with open(dashboard_file, 'r', encoding='utf-8') as f:
         return f.read()

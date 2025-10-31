@@ -34,7 +34,7 @@ from src.core.trading_day_manager import TradingDayManager
 from src.gateway.market_gateway import MarketGateway
 from src.gateway.trader_gateway import TraderGateway
 from src.system_config import DatacenterConfig
-from src.utils.common import load_broker_config
+from src.utils.common import load_md_broker_config, load_td_broker_config
 from src.utils.get_path import get_path_ins
 from src.utils.log import get_logger
 
@@ -369,10 +369,10 @@ class DataCenterService:
             def start_market_gateway(gateway):
                 """启动行情网关（使用事件机制判断登录状态）"""
                 try:
-                    broker_config = load_broker_config()
+                    broker_config = load_md_broker_config()
                     if not broker_config:
-                        self._add_log("ERROR", "未找到CTP服务器配置")
-                        raise ValueError("未找到CTP服务器配置")
+                        self._add_log("ERROR", "未找到行情网关配置")
+                        raise ValueError("未找到行情网关配置")
                     
                     broker_name = broker_config.get("broker_name")
                     config = broker_config.get("config")
@@ -443,7 +443,7 @@ class DataCenterService:
             def start_trader_gateway(gateway):
                 """启动交易网关并登录（用于获取trading_day和合约信息）"""
                 try:
-                    broker_config = load_broker_config()
+                    broker_config = load_td_broker_config()
                     if not broker_config:
                         self._add_log("WARNING", "未找到交易网关配置，跳过启动")
                         return
@@ -454,6 +454,8 @@ class DataCenterService:
                     # 创建登录完成事件
                     login_event = threading.Event()
                     login_success = [False]
+                    login_error_code = [0]  # 保存错误代码
+                    login_error_msg = [""]  # 保存错误消息
                     
                     # 创建结算单确认完成事件
                     confirm_event = threading.Event()
@@ -465,18 +467,36 @@ class DataCenterService:
                     
                     def on_td_login(event: Event):
                         """监听 TD_GATEWAY_LOGIN 事件"""
+                        self.logger.info(f"[DEBUG] on_td_login 回调被触发")
                         payload = event.payload or {}
-                        if payload.get("code") == 0:
+                        code = payload.get("code")
+                        self.logger.info(f"[DEBUG] 收到登录事件，code={code}")
+                        
+                        if code == 0:
                             # 登录成功
                             trading_day = payload.get("data", {}).get("TradingDay", "未知")
                             self._add_log("INFO", f"✓ 交易网关 {broker_name} 登录成功，交易日: {trading_day}")
                             login_success[0] = True
                         else:
-                            # 登录失败
+                            # 登录失败或认证失败
                             error_msg = payload.get("message", "未知错误")
-                            self._add_log("WARNING", f"✗ 交易网关 {broker_name} 登录失败: {error_msg}")
+                            login_error_code[0] = code
+                            login_error_msg[0] = error_msg
+                            
+                            if code == 7002:
+                                # 认证失败（致命错误）
+                                self._add_log("ERROR", f"✗ 交易网关 {broker_name} 认证失败: {error_msg}")
+                                self.logger.error(f"[DEBUG] 检测到认证失败，code=7002")
+                                error_detail = payload.get("data", {}).get("error", "")
+                                if error_detail:
+                                    self._add_log("ERROR", f"详细错误: {error_detail}")
+                            else:
+                                # 登录失败
+                                self._add_log("ERROR", f"✗ 交易网关 {broker_name} 登录失败: {error_msg}")
+                                self.logger.error(f"[DEBUG] 检测到登录失败，code={code}")
                         
                         # 设置事件，结束等待
+                        self.logger.info(f"[DEBUG] 设置 login_event")
                         login_event.set()
                     
                     def on_td_confirm(event: Event):
@@ -525,13 +545,30 @@ class DataCenterService:
                         # 步骤1: 等待登录完成
                         max_wait_login = 10
                         self._add_log("INFO", "等待交易网关登录...")
+                        self.logger.info(f"[DEBUG] 开始等待 login_event, 超时={max_wait_login}秒")
+                        
                         if login_event.wait(timeout=max_wait_login):
+                            self.logger.info(f"[DEBUG] login_event 已触发, login_success={login_success[0]}")
                             if not login_success[0]:
-                                self._add_log("WARNING", "交易网关登录失败，将使用系统日期")
-                                return
+                                # 登录失败，抛出异常阻止后续启动
+                                error_code = login_error_code[0]
+                                error_msg = login_error_msg[0]
+                                self.logger.error(f"[DEBUG] 准备抛出异常: error_code={error_code}, error_msg={error_msg}")
+                                
+                                if error_code == 7002:
+                                    # 认证失败
+                                    error_message = f"交易网关认证失败: {error_msg}，请检查配置文件中的认证信息"
+                                    self._add_log("ERROR", error_message)
+                                    raise RuntimeError(error_message)
+                                else:
+                                    # 登录失败
+                                    error_message = f"交易网关登录失败: {error_msg}，请检查配置文件中的登录信息"
+                                    self._add_log("ERROR", error_message)
+                                    raise RuntimeError(error_message)
                         else:
-                            self._add_log("WARNING", f"交易网关登录超时（{max_wait_login}秒），将使用系统日期")
-                            return
+                            self.logger.error(f"[DEBUG] login_event 超时")
+                            self._add_log("ERROR", f"交易网关登录超时（{max_wait_login}秒）")
+                            raise RuntimeError(f"交易网关登录超时（{max_wait_login}秒），请检查网络连接和CTP服务器状态")
                         
                         # 步骤2: 等待结算单确认
                         max_wait_confirm = 10
@@ -563,8 +600,16 @@ class DataCenterService:
                         self.event_bus.unsubscribe(EventType.TD_CONFIRM_SUCCESS, on_td_confirm)
                         self.event_bus.unsubscribe(EventType.TD_QRY_INS, on_td_qry_ins)
                 
+                except RuntimeError as err:
+                    # 认证失败、登录失败、超时等致命错误，重新抛出异常阻止启动
+                    self.logger.error(f"[DEBUG] 捕获到 RuntimeError: {err}")
+                    self._add_log("ERROR", f"交易网关启动失败: {err}")
+                    self.logger.error(f"[DEBUG] 重新抛出 RuntimeError")
+                    raise
                 except Exception as err:
-                    self._add_log("WARNING", f"交易网关启动失败: {err}，将使用系统日期")
+                    # 其他非预期异常，记录警告但允许系统继续运行
+                    self.logger.warning(f"[DEBUG] 捕获到其他异常: {type(err).__name__}: {err}")
+                    self._add_log("WARNING", f"交易网关启动异常: {err}，将使用系统日期")
                     # 不抛出异常，允许系统继续运行（使用系统日期作为fallback）
             
             self.starter.register_module(

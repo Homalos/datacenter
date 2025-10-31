@@ -19,13 +19,15 @@ logger = get_logger(__name__)
 def main():
     """启动Web控制面板"""
     logger.info("=" * 80)
-    logger.info("Homalos 数据中心 - Web控制面板")
+    logger.info("Homalos 数据中心 - Web控制面板 (Vue 3 + TypeScript)")
     logger.info("=" * 80)
     logger.info("")
     logger.info(f"📊 控制面板地址: http://{settings.API_HOST}:{settings.API_PORT}/dashboard")
     logger.info(f"📖 API文档: http://{settings.API_HOST}:{settings.API_PORT}/docs")
     logger.info(f"❤️  健康检查: http://{settings.API_HOST}:{settings.API_PORT}/health")
     logger.info("")
+    logger.info("💡 开发模式: cd frontend && npm run dev")
+    logger.info("🏗️  生产构建: cd frontend && npm run build")
     logger.info("提示: 在Web界面中启动/停止数据中心核心服务")
     logger.info("=" * 80)
     

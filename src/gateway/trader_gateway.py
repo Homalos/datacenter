@@ -459,6 +459,16 @@ class CtpTdApi(TdApi):
             self.auth_status = False
             self.login_status = False
             self.logger.exception(rsp_error_msg)
+            
+            # 发布认证失败事件，让订阅者感知到致命错误
+            if self.gateway.event_bus:
+                payload = {
+                    "code": RspCode.AUTH_TD_FAILED,
+                    "message": RspMsg.AUTH_TD_FAILED,
+                    "data": {"error": rsp_error_msg}
+                }
+                self.gateway.event_bus.publish(Event(EventType.TD_GATEWAY_LOGIN, payload=payload))
+                self.logger.info("已发布 TD_GATEWAY_LOGIN 事件（认证失败）")
             return
         else:
             # 请求响应的所有数据包全部返回，并且没有错误，则认为成功

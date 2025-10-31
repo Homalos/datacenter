@@ -174,27 +174,27 @@ class ContractManager:
                     # 如果行情网关就绪但交易网关未就绪，每次循环打印等待日志
                     if self._md_gateway_ready and not self._td_gateway_ready:
                         self.logger.info(
-                            f"⏳ 等待交易网关登录... (已等待{elapsed_time}秒/最多60秒)"
+                            f"等待交易网关登录... (已等待{elapsed_time}秒/最多60秒)"
                         )
             
             # 超时：60秒后仍未就绪
             with self._gateway_ready_lock:
                 if not self._subscription_triggered:
-                    # 标记所有未就绪的条件为就绪（超时fallback）
+                    # 超时后不再强制订阅，记录错误并退出
                     if not self._td_gateway_ready:
-                        self.logger.warning(
-                            f"⚠️ 交易网关登录超时（{max_wait_time}秒），将使用系统日期继续订阅行情"
+                        self.logger.error(
+                            f"交易网关登录超时（{max_wait_time}秒），无法订阅行情"
                         )
-                        self._td_gateway_ready = True
+                        self.logger.error(
+                            "可能原因：1) 交易网关认证失败 2) 网络连接问题 3) CTP服务器无响应"
+                        )
                     
                     if not self._contract_file_ready:
-                        self.logger.warning(
-                            f"⚠️ 合约文件更新超时（{max_wait_time}秒），将使用现有合约列表继续订阅行情"
+                        self.logger.error(
+                            f"合约文件更新超时（{max_wait_time}秒），无法订阅行情"
                         )
-                        self._contract_file_ready = True
                     
-                    # 检查是否可以开始订阅
-                    self._check_and_subscribe()
+                    self.logger.error("请检查数据中心启动日志，修复交易网关问题后重新启动")
                 else:
                     self.logger.debug("订阅已触发，超时检查线程正常退出")
         
