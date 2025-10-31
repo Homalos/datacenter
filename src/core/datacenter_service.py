@@ -474,7 +474,7 @@ class DataCenterService:
                         
                         if code == 0:
                             # 登录成功
-                            trading_day = payload.get("data", {}).get("TradingDay", "未知")
+                            trading_day = payload.get("data", {}).get("trading_day", "未知")
                             self._add_log("INFO", f"✓ 交易网关 {broker_name} 登录成功，交易日: {trading_day}")
                             login_success[0] = True
                         else:

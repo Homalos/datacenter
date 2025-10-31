@@ -242,7 +242,7 @@ class ContractManager:
 
             if payload and payload.get("code") == 0:
                 # 登录成功，提取trading_day
-                trading_day = payload.get("data", {}).get("TradingDay", "未知")
+                trading_day = payload.get("data", {}).get("trading_day", "未知")
                 
                 with self._gateway_ready_lock:
                     self.logger.info(f"✓ 交易网关登录成功，交易日: {trading_day}")

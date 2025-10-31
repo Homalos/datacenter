@@ -9,6 +9,7 @@
 @Software   : PyCharm
 @Description: K线管理器 - 管理所有合约的K线生成
 """
+import threading
 import pandas as pd
 from typing import Optional
 
@@ -53,6 +54,9 @@ class BarManager:
         # key: instrument_id, value: MultiBarGenerator
         self.generators: dict[str, MultiBarGenerator] = {}
         
+        # 🔒 线程锁：保护 generators 字典的并发访问
+        self._generators_lock = threading.Lock()
+        
         # 订阅Tick事件
         self.event_bus.subscribe(EventType.TICK, self._on_tick)
         
@@ -75,12 +79,18 @@ class BarManager:
             if not tick or not tick.instrument_id:
                 return
             
-            # 获取或创建该合约的K线生成器
+            # 获取或创建该合约的K线生成器（双重检查锁定）
             instrument_id = tick.instrument_id
-            if instrument_id not in self.generators:
-                self._create_generator(instrument_id)
             
-            # 更新K线
+            # 🔒 第一次检查（无锁，快速路径）
+            if instrument_id not in self.generators:
+                # 🔒 加锁创建（慢速路径）
+                with self._generators_lock:
+                    # 🔒 第二次检查（持锁，防止重复创建）
+                    if instrument_id not in self.generators:
+                        self._create_generator(instrument_id)
+            
+            # 更新K线（无需持锁，生成器内部是线程安全的）
             self.generators[instrument_id].update_tick(tick)
         
         except Exception as e:
@@ -92,20 +102,22 @@ class BarManager:
         
         Args:
             instrument_id: 合约代码
+            
+        注意：此方法必须在持有 self._generators_lock 的情况下调用
         """
-        # 创建生成器前统计当前数量
-        current_count = len(self.generators)
-        
         # 创建多周期K线生成器
         self.generators[instrument_id] = MultiBarGenerator(
             intervals=self.intervals,
             on_bar=self._on_bar_generated
         )
         
+        # ⭐ 在添加到字典后统计数量（确保计数准确）
+        current_count = len(self.generators)
+        
         # 打印详细进度（使用INFO级别，便于在Web界面显示）
         self.logger.info(
             f"✓ 已为合约 [{instrument_id}] 创建多周期K线合成器 "
-            f"(第 {current_count + 1} 个合约) | "
+            f"(第 {current_count} 个合约) | "
             f"支持周期: {', '.join(self.intervals)}"
         )
     
@@ -251,18 +263,20 @@ class BarManager:
         return {}
     
     def get_all_generators(self) -> dict[str, MultiBarGenerator]:
-        """获取所有合约的K线生成器"""
-        return self.generators.copy()
+        """获取所有合约的K线生成器（线程安全）"""
+        with self._generators_lock:
+            return self.generators.copy()
     
     def get_statistics(self) -> dict:
         """
-        获取K线管理器统计信息
+        获取K线管理器统计信息（线程安全）
         
         Returns:
             统计信息字典
         """
-        return {
-            "total_contracts": len(self.generators),
-            "intervals": self.intervals,
-            "contracts": list(self.generators.keys())
-        }
+        with self._generators_lock:
+            return {
+                "total_contracts": len(self.generators),
+                "intervals": self.intervals,
+                "contracts": list(self.generators.keys())
+            }

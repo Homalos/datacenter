@@ -216,7 +216,7 @@ class DuckDBSingleFileWriter:
         
         # 🔥 线程池：限制最大并发刷新线程数，避免线程爆炸
         self.executor = ThreadPoolExecutor(
-            max_workers=4,  # 最多4个并发刷新线程（通常1天只需1个，但允许多日并发）
+            max_workers=2,  # ✅ 优化：2个并发刷新线程（1个处理当天，1个处理跨日情况）
             thread_name_prefix="DuckDB-Pool"
         )
         self._future_counter = 0  # Future计数器，用于生成唯一任务ID
@@ -225,8 +225,8 @@ class DuckDBSingleFileWriter:
         # 分表架构：不再需要单一建表SQL，在写入时动态生成
         
         self.logger.info(
-            f"DuckDB写入器已初始化（按合约分表 + 文件锁保护 + 线程池）：路径={db_path}，"
-            f"批量阈值={batch_threshold}，类型={data_type}，线程池大小=4"
+            f"✓ DuckDB写入器已初始化 [{data_type.upper()}]：路径={db_path}，"
+            f"批量阈值={batch_threshold}，线程池大小=2"
         )
     
     def submit_batch(self, df: pd.DataFrame) -> None:
@@ -321,16 +321,57 @@ class DuckDBSingleFileWriter:
                 self.file_locks[trading_day] = threading.Lock()
             return self.file_locks[trading_day]
     
+    def _calculate_dynamic_timeout(self, row_count: int) -> float:
+        """
+        根据数据量动态计算超时时间
+        
+        Args:
+            row_count: 数据行数
+            
+        Returns:
+            超时时间（秒）
+            
+        计算公式：
+            timeout = base_timeout + (row_count / 1000) * timeout_per_1k_rows
+            
+        示例：
+            - 1000 条   → 900 + 1*10 = 910 秒 （15.2分钟）
+            - 10000 条  → 900 + 10*10 = 1000 秒 （16.7分钟）
+            - 30000 条  → 900 + 30*10 = 1200 秒 （20分钟）
+        """
+        # 使用配置的 max_thread_lifetime 作为基础超时
+        base_timeout = self.max_thread_lifetime  # 900秒（15分钟）
+        
+        # 每1000条数据增加10秒超时
+        timeout_per_1k_rows = 10
+        
+        # 计算动态超时
+        calculated_timeout = base_timeout + (row_count / 1000) * timeout_per_1k_rows
+        
+        # 增加20%安全边际
+        calculated_timeout *= 1.2
+        
+        # 限制最大超时为30分钟
+        max_allowed_timeout = 1800
+        
+        return min(calculated_timeout, max_allowed_timeout)
+    
     def _monitor_and_cleanup_threads(self) -> Dict:
         """
-        监控并清理僵尸任务
+        监控并清理僵尸任务（优化版）
+        
+        改进点：
+        1. 动态超时计算：根据数据量调整超时阈值
+        2. 主动清理：从跟踪表中移除超时任务
+        3. 详细日志：记录超时任务的详细信息
         
         Returns:
             {
                 'total_threads': int,  # 总线程数
                 'pool_threads': int,  # 线程池线程数
                 'zombie_tasks': int,  # 僵尸任务数
-                'cleaned': int  # 已清理的任务数
+                'cleaned': int,  # 已清理的任务数
+                'active_tracked': int  # 当前跟踪的活跃任务数
             }
         """
         import time
@@ -347,27 +388,43 @@ class DuckDBSingleFileWriter:
         with self.thread_track_lock:
             for task_id, info in list(self.active_threads.items()):
                 task_age = current_time - info['start_time']
+                row_count = info['row_count']
                 
-                # 超时任务，视为僵尸任务
-                if task_age > self.max_thread_lifetime:
-                    zombie_tasks.append({
+                # 动态计算超时阈值
+                timeout_threshold = self._calculate_dynamic_timeout(row_count)
+                
+                # 检查是否超时
+                if task_age > timeout_threshold:
+                    zombie_info = {
                         'task_id': task_id,
                         'age': task_age,
+                        'timeout': timeout_threshold,
                         'trading_day': info['trading_day'],
-                        'row_count': info['row_count'],
+                        'row_count': row_count,
                         'thread_name': info.get('thread_name', 'unknown')
-                    })
+                    }
+                    zombie_tasks.append(zombie_info)
+                    
+                    # 记录详细的僵尸任务信息
                     self.logger.error(
-                        f"🧟 检测到僵尸任务：{task_id}（线程={info.get('thread_name', 'unknown')}），"
-                        f"已运行{task_age:.1f}秒（超时阈值{self.max_thread_lifetime}秒），"
-                        f"交易日={info['trading_day']}，数据量={info['row_count']}条"
+                        f"🧟 检测到僵尸任务：{task_id}（线程={zombie_info['thread_name']}），"
+                        f"已运行{task_age:.1f}秒（动态超时阈值{timeout_threshold:.1f}秒），"
+                        f"交易日={zombie_info['trading_day']}，数据量={row_count}条"
+                    )
+                    
+                    # ⭐ 主动清理：从跟踪表中移除（避免跟踪表无限增长）
+                    self.active_threads.pop(task_id, None)
+                    cleaned_count += 1
+                    
+                    self.logger.warning(
+                        f"🧹 已清理僵尸任务跟踪记录：{task_id}（任务可能仍在后台运行）"
                     )
         
         # 记录警告
         if zombie_tasks:
             self.logger.warning(
-                f"发现{len(zombie_tasks)}个僵尸任务，"
-                f"线程池线程数={len(pool_threads)}"
+                f"发现 {len(zombie_tasks)} 个僵尸任务，已清理 {cleaned_count} 个跟踪记录，"
+                f"线程池线程数={len(pool_threads)}，活跃跟踪数={len(self.active_threads)}"
             )
         
         return {
@@ -440,7 +497,6 @@ class DuckDBSingleFileWriter:
                 
                 # 按InstrumentID分组（已排序，高效）
                 for instrument_id, group_df in merged_df.groupby('InstrumentID', sort=False):
-                    instrument_id: str
                     # 4.1 生成表名和创建SQL
                     if self.data_type == 'ticks':
                         create_sql = create_tick_table_sql(instrument_id)
@@ -492,14 +548,36 @@ class DuckDBSingleFileWriter:
             finally:
                 # 6. 关闭连接
                 conn.close()
-                self.logger.debug(f"释放文件锁：{trading_day}，写入完成")
                 
                 # 记录线程结束，从跟踪中移除
                 end_time = time.time()
                 elapsed = end_time - start_time
+                
+                # 计算性能指标
+                rows_per_second = row_count / elapsed if elapsed > 0 else 0
+                dynamic_timeout = self._calculate_dynamic_timeout(row_count)
+                timeout_usage_percent = (elapsed / dynamic_timeout) * 100 if dynamic_timeout > 0 else 0
+                
+                # 记录详细的性能日志
+                self.logger.info(
+                    f"📊 DuckDB写入任务完成：{task_id}，"
+                    f"交易日={trading_day}，数据量={row_count}条，"
+                    f"耗时={elapsed:.1f}秒，速度={rows_per_second:.0f}条/秒，"
+                    f"超时阈值={dynamic_timeout:.1f}秒，使用率={timeout_usage_percent:.1f}%"
+                )
+                
+                # 如果任务耗时接近超时阈值，发出警告
+                if timeout_usage_percent > 80:
+                    self.logger.warning(
+                        f"⚠️ 任务 {task_id} 耗时接近超时阈值（{timeout_usage_percent:.1f}%），"
+                        f"可能需要优化写入性能或调整超时配置"
+                    )
+                
+                # 从跟踪表中移除任务
                 with self.thread_track_lock:
                     if task_id in self.active_threads:
                         del self.active_threads[task_id]
+                        self.logger.debug(f"✓ 任务 {task_id} 已从跟踪表中移除")
                 
                 self.logger.debug(
                     f"线程池任务{task_id}完成（{thread_name}），耗时{elapsed:.2f}秒，"

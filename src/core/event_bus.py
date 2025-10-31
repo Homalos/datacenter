@@ -126,6 +126,11 @@ class EventBus:
 
         # 启动同步消费线程
         for qname in self._queues:
+            # 🔒 检查是否已有该线程在运行（防止线程泄漏）
+            if qname in self._threads and self._threads[qname].is_alive():
+                self.logger.warning(f"{qname} 同步消费线程已在运行，跳过创建")
+                continue
+            
             thread = threading.Thread(
                 target=self._sync_loop, args=(qname,), daemon=True, name=f"SyncLoop-{qname}"
             )
