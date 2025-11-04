@@ -28,8 +28,9 @@ class Config(object):
     # 生产配置文件
     _prod_config_path = config_dir_path / Const.PROD_CONFIG_FILENAME
 
+    datacenter_config_path = _datacenter_config_path
     # 系统配置文件使用 load_yaml 加载
-    datacenter_config = load_yaml(str(_datacenter_config_path))
+    datacenter_config = load_yaml(str(datacenter_config_path))
 
     # 项目名称
     system_name = datacenter_config.get("base", {}).get("name")

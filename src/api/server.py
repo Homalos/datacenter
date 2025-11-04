@@ -23,10 +23,12 @@ from fastapi.middleware.cors import CORSMiddleware
 from sse_starlette.sse import EventSourceResponse
 
 from src.core.datacenter_service import DataCenterService
+from src.utils.log import get_logger
 
 # 全局数据中心服务实例（新架构，推荐使用）
 datacenter_service = DataCenterService()
 
+logger = get_logger(datacenter_service.__class__.__name__)
 
 app = FastAPI(
     title="Homalos Data Center API",
@@ -36,7 +38,7 @@ app = FastAPI(
 
 # 添加CORS中间件（允许前端跨域访问）
 app.add_middleware(
-    CORSMiddleware,
+    CORSMiddleware,  # type: ignore[arg-type]
     allow_origins=["*"],
     allow_credentials=True,
     allow_methods=["*"],
@@ -98,8 +100,8 @@ def health_check():
             health_details = datacenter_service.metrics_collector.check_health()
             health_status["healthy"] = health_details.get("overall_healthy", True)
             health_status["details"] = health_details
-        except Exception:
-            pass
+        except Exception as e:
+            logger.exception(f"Failed to check health: {str(e)}")
     
     return health_status
 
@@ -116,8 +118,8 @@ def get_about_info():
         from src.system_config import Config
         from src.utils.config_manager import ConfigManager
         
-        # 加载数据中心配置
-        config_manager = ConfigManager(str(Config.datacenter_config))
+        # 加载数据中心配置（使用配置文件路径，而不是配置字典）
+        config_manager = ConfigManager(str(Config.datacenter_config_path))
         
         # 获取基础配置
         base_config = config_manager.get("base", {})
@@ -355,9 +357,7 @@ def get_system_status():
         if datacenter_service.hybrid_storage and hasattr(datacenter_service.hybrid_storage, 'get_statistics'):
             status["storage"] = datacenter_service.hybrid_storage.get_statistics()
         
-        # 归档器状态
-        if datacenter_service.data_archiver:
-            status["archiver"] = datacenter_service.data_archiver.get_statistics()
+        # 注：data_archiver 已废弃，DataCenterService 中不再包含此模块
         
         return status
     
@@ -377,7 +377,6 @@ def get_metrics():
     try:
         # 收集所有指标
         metrics = datacenter_service.metrics_collector.collect_all_metrics()
-        
         return metrics
     
     except Exception as e:
@@ -404,21 +403,24 @@ def get_metrics_summary():
         )
 
 
-@app.post("/archive")
-def trigger_archive():
-    """手动触发数据归档（管理员操作）"""
-    if not datacenter_service.is_running() or not datacenter_service.data_archiver:
-        raise HTTPException(status_code=503, detail="归档服务未初始化或数据中心未运行")
-    
-    try:
-        result = datacenter_service.data_archiver.archive_old_data()
-        return result
-    
-    except Exception as e:
-        raise HTTPException(
-            status_code=500,
-            detail=f"归档失败: {str(e)}"
-        )
+# 注：/archive 端点已废弃，因为 DataCenterService 中不再包含 data_archiver 模块
+# 如需归档功能，请单独实现归档服务
+#
+# @app.post("/archive")
+# def trigger_archive():
+#     """手动触发数据归档（管理员操作）"""
+#     if not datacenter_service.is_running() or not datacenter_service.data_archiver:
+#         raise HTTPException(status_code=503, detail="归档服务未初始化或数据中心未运行")
+#     
+#     try:
+#         result = datacenter_service.data_archiver.archive_old_data()
+#         return result
+#     
+#     except Exception as e:
+#         raise HTTPException(
+#             status_code=500,
+#             detail=f"归档失败: {str(e)}"
+#         )
 
 
 # ============================================================
@@ -438,7 +440,7 @@ async def dashboard():
 
 
 @app.get("/dashboard/{full_path:path}", response_class=HTMLResponse)
-async def dashboard_spa_router(full_path: str):
+async def dashboard_spa_router():
     """
     SPA 路由支持 - 所有 /dashboard/* 路径返回 index.html
     让 Vue Router 处理客户端路由
@@ -559,20 +561,18 @@ async def get_health_metrics():
     Returns:
         健康指标数据（包含线程、队列、缓冲区状态）
     """
-    if not datacenter_service or not datacenter_service.storage:
-        raise HTTPException(status_code=503, detail="数据中心未运行")
+    if not datacenter_service.is_running() or not datacenter_service.hybrid_storage:
+        raise HTTPException(status_code=503, detail="数据中心未运行或存储服务未初始化")
     
     try:
-        health = datacenter_service.storage.get_health_metrics()
+        health = datacenter_service.hybrid_storage.get_health_metrics()
         return {
             "code": 0,
             "message": "success",
             "data": health
         }
     except Exception as e:
-        import logging
-        logger = logging.getLogger(__name__)
-        logger.error(f"获取健康指标失败：{e}", exc_info=True)
+        logger.exception(f"获取健康指标失败：{e}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"获取健康指标失败: {str(e)}")
 
 
@@ -594,13 +594,21 @@ async def stream_datacenter_logs(request: Request):
         log_queue = asyncio.Queue()
         loop = asyncio.get_event_loop()
         
-        def log_callback(log_entry):
-            """日志回调函数（线程安全）"""
+        def log_callback(entry):
+            """
+            日志回调函数（线程安全）
+            
+            Args:
+                entry: 日志条目
+
+            Returns:
+                None
+            """
             try:
                 # 使用 call_soon_threadsafe 在事件循环中安全地添加日志
-                loop.call_soon_threadsafe(log_queue.put_nowait, log_entry)
-            except Exception:
-                pass
+                loop.call_soon_threadsafe(log_queue.put_nowait, entry)
+            except Exception as e:
+                logger.exception(f"日志回调失败：{e}", exc_info=True)
         
         # 注册日志回调
         datacenter_service.add_log_callback(log_callback)
@@ -640,34 +648,12 @@ async def stream_datacenter_logs(request: Request):
     return EventSourceResponse(event_generator())
 
 
-@app.post("/datacenter/test-log")
-async def test_log():
-    """
-    测试日志推送功能
-    
-    手动触发一条测试日志，用于验证日志流是否正常工作
-    """
-    import random
-    
-    test_messages = [
-        "🧪 这是一条测试日志",
-        "🎯 日志流功能测试中...",
-        "✅ 如果您能看到这条消息，说明日志流工作正常！",
-        "📡 测试消息已发送"
-    ]
-    
-    message = random.choice(test_messages)
-    datacenter_service._add_log("INFO", message)
-    
-    return {"code": 0, "message": "测试日志已发送", "data": {"message": message}}
-
-
 # ============================================================
 #  异常处理
 # ============================================================
 
 @app.exception_handler(Exception)
-async def global_exception_handler(request, exc):
+async def global_exception_handler(exc):
     """全局异常处理"""
     print(f"全局异常: {traceback.format_exc()}")
     return JSONResponse(

@@ -127,7 +127,15 @@ class DataCenterService:
         self._add_log("INFO", "数据中心服务初始化完成")
     
     def _update_state(self, **kwargs):
-        """更新服务状态"""
+        """
+        更新服务状态
+
+        Args:
+            **kwargs:
+
+        Returns:
+
+        """
         with self._state_lock:
             for key, value in kwargs.items():
                 if hasattr(self._state, key):
@@ -137,7 +145,17 @@ class DataCenterService:
             # 注意：运行时长现在在 get_state() 中实时计算，无需在此处更新
     
     def _add_log(self, level: str, message: str, **extra):
-        """添加日志"""
+        """
+        添加日志
+
+        Args:
+            level:
+            message:
+            **extra:
+
+        Returns:
+
+        """
         log_entry = {
             "timestamp": datetime.now().isoformat(),
             "level": level,
@@ -219,7 +237,12 @@ class DataCenterService:
         return self._log_buffer[-limit:]
     
     def get_state(self) -> ServiceState:
-        """获取当前状态（实时计算运行时长）"""
+        """
+        获取当前状态（实时计算运行时长）
+
+        Returns:
+
+        """
         with self._state_lock:
             # 深拷贝状态，避免修改原始对象
             state_copy = ServiceState(
@@ -281,7 +304,12 @@ class DataCenterService:
         return True
     
     def _start_internal(self):
-        """内部启动逻辑"""
+        """
+        内部启动逻辑
+
+        Returns:
+
+        """
         try:
             self._add_log("INFO", "=" * 60)
             self._add_log("INFO", "Homalos 数据中心启动流程开始")
@@ -794,7 +822,12 @@ class DataCenterService:
             )
     
     def restart(self) -> bool:
-        """重启数据中心"""
+        """
+        重启数据中心
+
+        Returns:
+
+        """
         self._add_log("INFO", "执行重启操作...")
         if self.is_running():
             self.stop()
@@ -813,7 +846,17 @@ class DataCenterService:
         status: str, 
         error: Optional[str] = None
         ):
-        """更新模块状态"""
+        """
+        更新模块状态
+
+        Args:
+            module_name:
+            status:
+            error:
+
+        Returns:
+
+        """
         with self._state_lock:
             if module_name not in self._state.modules:
                 self._state.modules[module_name] = ModuleStatus(
