@@ -292,6 +292,10 @@ class HybridStorage:
             - 复制+清空操作在锁保护下原子执行
             - 实际保存在后台线程执行，避免阻塞Tick接收
         """
+        # ✅ 修复：检查停止标志（最早返回，避免处理数据）
+        if self._stop_flush.is_set():
+            return  # 如果已停止，直接返回，不处理任何数据
+        
         try:
             # 解析 Tick 数据
             payload = event.payload

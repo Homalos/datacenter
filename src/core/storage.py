@@ -10,15 +10,16 @@
 @Description: 数据存储与加载封装（支持多合约、日期文件夹，使用trading_day命名）
 """
 import os
+import shutil
+import tarfile
+import threading
+from datetime import datetime
+from pathlib import Path
+from typing import Optional
+
 import duckdb
 import pandas as pd  # type: ignore
-import threading
-import tarfile
-import shutil
 from config import settings
-from pathlib import Path
-from datetime import datetime
-from typing import Optional, Dict
 
 from src.core.trading_day_manager import TradingDayManager
 from src.utils.log import get_logger
@@ -50,7 +51,7 @@ class DataStorage:
         self.compressed_folders: set[str] = set()  # 记录已压缩的文件夹
         
         # 文件锁字典：每个文件一把锁（防止并发写入冲突）
-        self._file_locks: Dict[str, threading.Lock] = {}
+        self._file_locks: dict[str, threading.Lock] = {}
         self._locks_lock = threading.Lock()  # 保护file_locks字典本身的锁
     
     def _get_file_lock(self, file_path: Path) -> threading.Lock:
@@ -209,11 +210,11 @@ class DataStorage:
                 
                 if duplicates > 0:
                     self.logger.info(
-                        f"✓ 去重完成: {file_path.name} "
+                        f"去重完成: {file_path.name} "
                         f"({original_count} → {len(df)}条, 去除{duplicates}条重复)"
                     )
                 else:
-                    self.logger.debug(f"✓ 无重复数据: {file_path.name}")
+                    self.logger.debug(f"无重复数据: {file_path.name}")
                 
                 return True
                 
@@ -435,7 +436,7 @@ class DataStorage:
             compression_ratio = (1 - compressed_size / total_size) * 100
             
             self.logger.info(
-                f"✓ 压缩成功: {trading_day}.tar.gz "
+                f"压缩成功: {trading_day}.tar.gz "
                 f"({compressed_size_mb:.2f}MB, 压缩率: {compression_ratio:.1f}%)"
             )
             
@@ -477,7 +478,7 @@ class DataStorage:
             with tarfile.open(archive_path, "r:gz") as tar:
                 tar.extractall(Path(self.base_path))
             
-            self.logger.info(f"✓ 解压成功: {trading_day}")
+            self.logger.info(f"解压成功: {trading_day}")
             return True
             
         except Exception as e:

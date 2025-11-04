@@ -177,21 +177,7 @@ def get_about_info():
         return {
             "success": False,
             "message": f"获取关于信息失败: {str(e)}",
-            "data": {
-                "name": "Homalos 数据中心",
-                "description": "期货行情数据采集与管理系统",
-                "version": "0.3.0",
-                "author": "Homalos Team",
-                "copyright": "Copyright © 2025 Homalos Team",
-                "contact": "",
-                "user_guide": "",
-                "timezone": "Asia/Shanghai",
-                "technology_stack": [
-                    "后端：Python 3.13 + FastAPI",
-                    "前端：Vue 3 + Naive UI + Vite",
-                    "数据库：DuckDB"
-                ]
-            }
+            "data": {}
         }
 
 

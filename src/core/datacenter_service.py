@@ -168,8 +168,8 @@ class DataCenterService:
         if data and data.get("code") == 0:
             self._td_login_status = True
             self._td_confirm_status = True
-            self.logger.info("✓ 结算单确认成功，交易网关完全就绪")
-            self._add_log("INFO", "✓ 结算单确认成功，交易网关完全就绪")
+            self.logger.info("结算单确认成功，交易网关完全就绪")
+            self._add_log("INFO", "结算单确认成功，交易网关完全就绪")
             
             # 发送查询合约事件，触发合约文件更新
             if self.event_bus:
@@ -197,8 +197,8 @@ class DataCenterService:
         data = event.payload
         if data and data.get("code") == 0:
             self._contract_file_updated = True
-            self.logger.info("✓ 合约文件更新完成")
-            self._add_log("INFO", "✓ 合约文件更新完成")
+            self.logger.info("合约文件更新完成")
+            self._add_log("INFO", "合约文件更新完成")
         else:
             self._contract_file_updated = False
             error_msg = f"合约文件更新失败: {data.get('message') if data else 'Unknown'}"
@@ -316,17 +316,17 @@ class DataCenterService:
             # 3. 创建存储层
             self._add_log("INFO", "初始化存储层...")
             
-            # Parquet/CSV 存储（使用trading_day_manager，用于历史数据归档）
-            self.parquet_storage = DataStorage(
+            # CSV 存储（使用trading_day_manager，用于历史数据归档）
+            self.csv_storage = DataStorage(
                 base_path="data",
                 trading_day_manager=self.trading_day_manager
             )
             self.starter.register_module(
-                name="ParquetStorage",
-                instance=self.parquet_storage,
+                name="CSVStorage",
+                instance=self.csv_storage,
                 dependencies=[]
             )
-            self._update_module_status("ParquetStorage", "registered")
+            self._update_module_status("CSVStorage", "registered")
             
             # 混合存储（订阅 TICK 事件自动保存数据）
             # 初始化混合存储（DuckDB + CSV双层存储）
@@ -344,7 +344,7 @@ class DataCenterService:
             self.starter.register_module(
                 name="HybridStorage",
                 instance=self.hybrid_storage,
-                dependencies=["ParquetStorage"],
+                dependencies=["CSVStorage"],
                 stop_func=lambda storage: storage.stop()
             )
             self._update_module_status("HybridStorage", "registered")
@@ -386,12 +386,12 @@ class DataCenterService:
                         payload = event.payload or {}
                         if payload.get("code") == 0:
                             # code=0 表示登录成功
-                            self._add_log("INFO", f"✓ 行情网关 {broker_name} 登录成功")
+                            self._add_log("INFO", f"行情网关 {broker_name} 登录成功")
                             login_success[0] = True
                         else:
                             # code!=0 表示登录失败
                             error_msg = payload.get("message", "未知错误")
-                            self._add_log("ERROR", f"✗ 行情网关 {broker_name} 登录失败: {error_msg}")
+                            self._add_log("ERROR", f"行情网关 {broker_name} 登录失败: {error_msg}")
                         
                         # 无论成功或失败，都设置事件，结束等待
                         login_event.set()
@@ -410,7 +410,7 @@ class DataCenterService:
                             if login_success[0]:
                                 # 登录成功！
                                 # ContractManager 也会收到 MD_GATEWAY_LOGIN 事件并自动订阅合约
-                                time.sleep(0.5)  # 短暂等待，确保其他订阅者也处理了事件
+                                time.sleep(0.2)  # 短暂等待，确保其他订阅者也处理了事件
                             else:
                                 # 登录失败
                                 raise RuntimeError("行情网关登录失败")
@@ -441,7 +441,15 @@ class DataCenterService:
             self.trader_gateway = TraderGateway(event_bus=self.event_bus)
             
             def start_trader_gateway(gateway):
-                """启动交易网关并登录（用于获取trading_day和合约信息）"""
+                """
+                启动交易网关并登录（用于获取trading_day和合约信息）
+
+                Args:
+                    gateway:
+
+                Returns:
+
+                """
                 try:
                     broker_config = load_td_broker_config()
                     if not broker_config:
@@ -466,48 +474,62 @@ class DataCenterService:
                     contract_update_success = [False]
                     
                     def on_td_login(event: Event):
-                        """监听 TD_GATEWAY_LOGIN 事件"""
-                        self.logger.info(f"[DEBUG] on_td_login 回调被触发")
+                        """
+                        监听 TD_GATEWAY_LOGIN 事件
+
+                        Args:
+                            event:
+
+                        Returns:
+
+                        """
                         payload = event.payload or {}
                         code = payload.get("code")
-                        self.logger.info(f"[DEBUG] 收到登录事件，code={code}")
-                        
+
                         if code == 0:
                             # 登录成功
                             trading_day = payload.get("data", {}).get("trading_day", "未知")
-                            self._add_log("INFO", f"✓ 交易网关 {broker_name} 登录成功，交易日: {trading_day}")
+                            self._add_log("INFO", f"交易网关 {broker_name} 登录成功，交易日: {trading_day}")
                             login_success[0] = True
                         else:
                             # 登录失败或认证失败
-                            error_msg = payload.get("message", "未知错误")
+                            err_msg = payload.get("message", "未知错误")
                             login_error_code[0] = code
-                            login_error_msg[0] = error_msg
+                            login_error_msg[0] = err_msg
                             
                             if code == 7002:
                                 # 认证失败（致命错误）
-                                self._add_log("ERROR", f"✗ 交易网关 {broker_name} 认证失败: {error_msg}")
-                                self.logger.error(f"[DEBUG] 检测到认证失败，code=7002")
+                                self._add_log("ERROR", f"交易网关 {broker_name} 认证失败: {err_msg}")
+                                self.logger.error(f"检测到认证失败，code={code}")
                                 error_detail = payload.get("data", {}).get("error", "")
                                 if error_detail:
                                     self._add_log("ERROR", f"详细错误: {error_detail}")
                             else:
                                 # 登录失败
-                                self._add_log("ERROR", f"✗ 交易网关 {broker_name} 登录失败: {error_msg}")
-                                self.logger.error(f"[DEBUG] 检测到登录失败，code={code}")
+                                self._add_log("ERROR", f"交易网关 {broker_name} 登录失败: {err_msg}")
+                                self.logger.error(f"检测到登录失败，code={code}")
                         
                         # 设置事件，结束等待
-                        self.logger.info(f"[DEBUG] 设置 login_event")
+                        self.logger.info(f"设置 login_event")
                         login_event.set()
                     
                     def on_td_confirm(event: Event):
-                        """监听 TD_CONFIRM_SUCCESS 事件"""
+                        """
+                        监听 TD_CONFIRM_SUCCESS 事件
+
+                        Args:
+                            event:
+
+                        Returns:
+
+                        """
                         payload = event.payload or {}
                         if payload.get("code") == 0:
-                            self._add_log("INFO", "✓ 结算单确认成功，交易网关完全就绪")
+                            self._add_log("INFO", "结算单确认成功，交易网关完全就绪")
                             confirm_success[0] = True
                             self._td_confirm_status = True
                             
-                            # 🔥 关键步骤：发布查询合约事件，触发合约文件更新
+                            # 关键步骤：发布查询合约事件，触发合约文件更新
                             self._add_log("INFO", "发布查询合约事件，开始更新合约文件...")
                             self.event_bus.publish(Event(
                                 event_type=EventType.DATA_CENTER_QRY_INS,
@@ -515,21 +537,29 @@ class DataCenterService:
                                 source="DataCenterService"
                             ))
                         else:
-                            error_msg = payload.get("message", "未知错误")
-                            self._add_log("WARNING", f"✗ 结算单确认失败: {error_msg}")
+                            err_msg = payload.get("message", "未知错误")
+                            self._add_log("WARNING", f"结算单确认失败: {err_msg}")
                             self._td_confirm_status = False
                         
                         confirm_event.set()
                     
                     def on_td_qry_ins(event: Event):
-                        """监听 TD_QRY_INS 事件（合约文件更新完成）"""
+                        """
+                        监听 TD_QRY_INS 事件（合约文件更新完成）
+
+                        Args:
+                            event:
+
+                        Returns:
+
+                        """
                         payload = event.payload or {}
                         if payload.get("code") == 0:
-                            self._add_log("INFO", "✓ 合约文件更新完成，可以开始订阅行情")
+                            self._add_log("INFO", "合约文件更新完成，可以开始订阅行情")
                             contract_update_success[0] = True
                         else:
-                            error_msg = payload.get("message", "未知错误")
-                            self._add_log("WARNING", f"✗ 合约文件更新失败: {error_msg}")
+                            err_msg = payload.get("message", "未知错误")
+                            self._add_log("WARNING", f"合约文件更新失败: {err_msg}")
                         
                         contract_update_event.set()
                     
@@ -586,9 +616,9 @@ class DataCenterService:
                         self._add_log("INFO", "等待合约文件更新...")
                         if contract_update_event.wait(timeout=max_wait_contract):
                             if contract_update_success[0]:
-                                self._add_log("INFO", "✓ 交易网关完全就绪，合约文件已更新")
+                                self._add_log("INFO", "交易网关完全就绪，合约文件已更新")
                                 self._contract_file_updated = True
-                                time.sleep(0.5)  # 短暂等待，确保其他订阅者处理完毕
+                                time.sleep(0.2)  # 短暂等待，确保其他订阅者处理完毕
                             else:
                                 self._add_log("WARNING", "合约文件更新失败")
                         else:
@@ -631,7 +661,7 @@ class DataCenterService:
                 name="ContractManager",
                 instance=self.contract_manager,
                 dependencies=["EventBus", "MarketGateway"],
-                stop_func=lambda cm: cm.stop()  # ✅ 添加停止函数，确保取消订阅
+                stop_func=lambda cm: cm.stop()  # 添加停止函数，确保取消订阅
             )
             self._update_module_status("ContractManager", "registered")
             
@@ -647,7 +677,7 @@ class DataCenterService:
                 name="BarManager",
                 instance=self.bar_manager,
                 dependencies=["EventBus", "HybridStorage"],
-                stop_func=lambda bm: bm.stop()  # ✅ 添加停止函数，确保取消订阅
+                stop_func=lambda bm: bm.stop()  # 添加停止函数，确保取消订阅
             )
             self._update_module_status("BarManager", "registered")
             
@@ -731,7 +761,7 @@ class DataCenterService:
             if self.starter:
                 self._add_log("INFO", "停止所有模块...")
                 self.starter.stop()
-                self._add_log("INFO", "✓ 所有模块已停止")
+                self._add_log("INFO", "所有模块已停止")
             
             # 等待启动线程结束
             if self._start_thread and self._start_thread.is_alive():
@@ -740,7 +770,7 @@ class DataCenterService:
                 if self._start_thread.is_alive():
                     self._add_log("WARNING", "启动线程未在超时时间内结束")
             
-            self._add_log("INFO", "✓ 数据中心已停止")
+            self._add_log("INFO", "数据中心已停止")
             self._update_state(
                 status=ServiceStatus.STOPPED,
                 start_time=None,
