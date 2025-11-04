@@ -357,8 +357,6 @@ def get_system_status():
         if datacenter_service.hybrid_storage and hasattr(datacenter_service.hybrid_storage, 'get_statistics'):
             status["storage"] = datacenter_service.hybrid_storage.get_statistics()
         
-        # 注：data_archiver 已废弃，DataCenterService 中不再包含此模块
-        
         return status
     
     except Exception as e:
@@ -401,27 +399,6 @@ def get_metrics_summary():
             status_code=500,
             detail=f"获取监控摘要失败: {str(e)}"
         )
-
-
-# 注：/archive 端点已废弃，因为 DataCenterService 中不再包含 data_archiver 模块
-# 如需归档功能，请单独实现归档服务
-#
-# @app.post("/archive")
-# def trigger_archive():
-#     """手动触发数据归档（管理员操作）"""
-#     if not datacenter_service.is_running() or not datacenter_service.data_archiver:
-#         raise HTTPException(status_code=503, detail="归档服务未初始化或数据中心未运行")
-#     
-#     try:
-#         result = datacenter_service.data_archiver.archive_old_data()
-#         return result
-#     
-#     except Exception as e:
-#         raise HTTPException(
-#             status_code=500,
-#             detail=f"归档失败: {str(e)}"
-#         )
-
 
 # ============================================================
 #  可视化接口
