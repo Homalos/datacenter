@@ -11,7 +11,7 @@
 """
 import re
 import duckdb
-import pandas as pd
+import pandas as pd  # type: ignore
 import threading
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
@@ -29,32 +29,32 @@ def normalize_instrument_id(instrument_id: str) -> str:
     规范化合约ID为合法的SQL表名
     
     规则：
-    - 转小写
+    - ✅ 保留大小写（支持大写合约如 ZC609, AP604）
     - 移除特殊字符（只保留字母、数字、下划线）
     - 确保以字母开头（SQL表名要求）
     
     Args:
-        instrument_id: 原始合约ID（如 sa601, rb2511, IF2501）
+        instrument_id: 原始合约ID（如 sa601, rb2511, IF2501, ZC609）
     
     Returns:
-        规范化后的表名（如 sa601, rb2511, if2501）
+        规范化后的表名（如 sa601, rb2511, IF2501, ZC609）
     
     Examples:
         >>> normalize_instrument_id('sa601')
         'sa601'
         >>> normalize_instrument_id('IF2501')
-        'if2501'
-        >>> normalize_instrument_id('IC-2501')
-        'ic2501'
+        'IF2501'
+        >>> normalize_instrument_id('ZC-609')
+        'ZC609'
     """
     if not instrument_id:
         return 'unknown'
     
-    # 转小写
-    normalized = instrument_id.lower()
+    # ✅ 保留原始大小写（不再转小写）
+    normalized = instrument_id
     
-    # 移除特殊字符（只保留字母、数字、下划线）
-    normalized = re.sub(r'[^a-z0-9_]', '', normalized)
+    # 移除特殊字符（只保留字母、数字、下划线，包括大写字母）
+    normalized = re.sub(r'[^a-zA-Z0-9_]', '', normalized)
     
     # 确保以字母开头（SQL表名要求）
     if normalized and normalized[0].isdigit():
@@ -75,8 +75,9 @@ def create_tick_table_sql(instrument_id: str) -> str:
     """
     table_name = f"tick_{normalize_instrument_id(instrument_id)}"
     
+    # language=SQL
     return f"""
-    CREATE TABLE IF NOT EXISTS {table_name} (
+    CREATE TABLE IF NOT EXISTS "{table_name}" (
         TradingDay DATE,
         ExchangeID VARCHAR,
         LastPrice DOUBLE,
@@ -143,8 +144,9 @@ def create_kline_table_sql(instrument_id: str) -> str:
     """
     table_name = f"kline_{normalize_instrument_id(instrument_id)}"
     
+    # language=SQL
     return f"""
-    CREATE TABLE IF NOT EXISTS {table_name} (
+    CREATE TABLE IF NOT EXISTS "{table_name}" (
         BarType VARCHAR,
         TradingDay VARCHAR,
         UpdateTime VARCHAR,
@@ -497,6 +499,7 @@ class DuckDBSingleFileWriter:
                 
                 # 按InstrumentID分组（已排序，高效）
                 for instrument_id, group_df in merged_df.groupby('InstrumentID', sort=False):
+                    instrument_id: str = str(instrument_id)
                     # 4.1 生成表名和创建SQL
                     if self.data_type == 'ticks':
                         create_sql = create_tick_table_sql(instrument_id)
@@ -511,8 +514,8 @@ class DuckDBSingleFileWriter:
                     # 4.3 注册DataFrame为临时表
                     conn.register('temp_df', group_df)
                     
-                    # 4.4 批量插入
-                    conn.execute(f"INSERT INTO {table_name} SELECT * FROM temp_df")
+                    # 4.4 批量插入（使用双引号包裹表名，支持大小写）
+                    conn.execute(f'INSERT INTO "{table_name}" SELECT * FROM temp_df')
                     
                     # 4.5 取消注册
                     conn.unregister('temp_df')
@@ -770,8 +773,10 @@ class DuckDBQueryEngine:
                 table_name = f"kline_{normalize_instrument_id(instrument_id)}"
             
             # 查询（只需时间过滤，无需InstrumentID过滤）
+            # 使用双引号包裹表名，支持大小写敏感（ZC609 ≠ zc609）
+            # language=SQL
             query = f"""
-                SELECT * FROM {table_name}
+                SELECT * FROM "{table_name}"
                 WHERE Timestamp BETWEEN ? AND ?
                 ORDER BY Timestamp
             """
@@ -837,9 +842,10 @@ class DuckDBQueryEngine:
             else:  # klines
                 table_name = f"kline_{normalize_instrument_id(instrument_id)}"
             
+            # language=SQL
             union_queries = [
                 f"""
-                SELECT * FROM db{i}.{table_name}
+                SELECT * FROM db{i}."{table_name}"
                 WHERE Timestamp BETWEEN '{start_dt}' AND '{end_dt}'
                 """
                 for i in range(len(db_files))

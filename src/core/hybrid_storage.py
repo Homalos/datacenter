@@ -405,7 +405,7 @@ class HybridStorage:
             tick_dicts = []
             for tick in ticks_to_save:
                 # 转换日期格式：YYYYMMDD → YYYY-MM-DD（DuckDB DATE类型要求）
-                def format_date(date_str):
+                def format_date(date_str) -> str:
                     """将YYYYMMDD格式转换为YYYY-MM-DD"""
                     if date_str and len(str(date_str)) == 8:
                         s = str(date_str)
