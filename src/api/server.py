@@ -69,7 +69,7 @@ def root():
             "系统管理": {
                 "health": "GET /health",
                 "status": "GET /status",
-                "metrics": "GET /metrics",
+                "metrics_summary": "GET /metrics/summary",
                 "contracts": "GET /contracts?exchange=SHFE"
             },
             "可视化": {
@@ -366,22 +366,25 @@ def get_system_status():
         )
 
 
-@app.get("/metrics")
-def get_metrics():
-    """获取系统监控指标"""
-    if not datacenter_service.is_running() or not datacenter_service.metrics_collector:
-        raise HTTPException(status_code=503, detail="监控服务未初始化或数据中心未运行")
-    
-    try:
-        # 收集所有指标
-        metrics = datacenter_service.metrics_collector.collect_all_metrics()
-        return metrics
-    
-    except Exception as e:
-        raise HTTPException(
-            status_code=500,
-            detail=f"获取监控指标失败: {str(e)}"
-        )
+# 注：/metrics 接口已废弃，Web 页面使用 /metrics/summary
+# 如需完整监控数据（用于外部监控系统如 Prometheus），可以取消注释
+#
+# @app.get("/metrics")
+# def get_metrics():
+#     """获取系统监控指标（完整版）"""
+#     if not datacenter_service.is_running() or not datacenter_service.metrics_collector:
+#         raise HTTPException(status_code=503, detail="监控服务未初始化或数据中心未运行")
+#     
+#     try:
+#         # 收集所有指标
+#         metrics = datacenter_service.metrics_collector.collect_all_metrics()
+#         return metrics
+#     
+#     except Exception as e:
+#         raise HTTPException(
+#             status_code=500,
+#             detail=f"获取监控指标失败: {str(e)}"
+#         )
 
 
 @app.get("/metrics/summary")

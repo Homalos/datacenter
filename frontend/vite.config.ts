@@ -5,6 +5,7 @@ import { resolve } from 'path'
 // https://vitejs.dev/config/
 export default defineConfig({
   plugins: [vue()],
+  base: '/dashboard',  // ✅ 设置资源路径的 base，与 Vue Router base 一致
   resolve: {
     alias: {
       '@': resolve(__dirname, 'src')

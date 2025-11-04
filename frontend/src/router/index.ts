@@ -24,7 +24,7 @@ const routes: RouteRecordRaw[] = [
 ]
 
 const router = createRouter({
-  history: createWebHistory(),
+  history: createWebHistory('/dashboard'),  // ✅ 设置 base path 为 /dashboard
   routes
 })
 
