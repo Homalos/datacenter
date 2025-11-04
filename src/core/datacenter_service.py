@@ -510,7 +510,7 @@ class DataCenterService:
                                 self.logger.error(f"检测到登录失败，code={code}")
                         
                         # 设置事件，结束等待
-                        self.logger.info(f"设置 login_event")
+                        self.logger.info("设置 login_event")
                         login_event.set()
                     
                     def on_td_confirm(event: Event):
@@ -531,11 +531,12 @@ class DataCenterService:
                             
                             # 关键步骤：发布查询合约事件，触发合约文件更新
                             self._add_log("INFO", "发布查询合约事件，开始更新合约文件...")
-                            self.event_bus.publish(Event(
-                                event_type=EventType.DATA_CENTER_QRY_INS,
-                                payload={},
-                                source="DataCenterService"
-                            ))
+                            if self.event_bus:
+                                self.event_bus.publish(Event(
+                                    event_type=EventType.DATA_CENTER_QRY_INS,
+                                    payload={},
+                                    source="DataCenterService"
+                                ))
                         else:
                             err_msg = payload.get("message", "未知错误")
                             self._add_log("WARNING", f"结算单确认失败: {err_msg}")
@@ -596,7 +597,7 @@ class DataCenterService:
                                     self._add_log("ERROR", error_message)
                                     raise RuntimeError(error_message)
                         else:
-                            self.logger.error(f"[DEBUG] login_event 超时")
+                            self.logger.error("[DEBUG] login_event 超时")
                             self._add_log("ERROR", f"交易网关登录超时（{max_wait_login}秒）")
                             raise RuntimeError(f"交易网关登录超时（{max_wait_login}秒），请检查网络连接和CTP服务器状态")
                         
@@ -634,7 +635,7 @@ class DataCenterService:
                     # 认证失败、登录失败、超时等致命错误，重新抛出异常阻止启动
                     self.logger.error(f"[DEBUG] 捕获到 RuntimeError: {err}")
                     self._add_log("ERROR", f"交易网关启动失败: {err}")
-                    self.logger.error(f"[DEBUG] 重新抛出 RuntimeError")
+                    self.logger.error("[DEBUG] 重新抛出 RuntimeError")
                     raise
                 except Exception as err:
                     # 其他非预期异常，记录警告但允许系统继续运行

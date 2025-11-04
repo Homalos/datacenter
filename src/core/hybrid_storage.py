@@ -18,7 +18,7 @@ from typing import Optional
 
 import pandas as pd
 
-# 🔥 新增：DuckDB + 多线程CSV写入器
+# 新增：DuckDB + 多线程CSV写入器
 from src.core.duckdb_storage import DuckDBSingleFileWriter
 from src.core.event import Event, EventType
 from src.core.event_bus import EventBus
@@ -51,10 +51,10 @@ class HybridStorage:
                  parquet_tick_path: str = "data/csv/ticks",
                  parquet_kline_path: str = "data/csv/klines",
                  retention_days: int = 7,
-                 flush_interval: Optional[int] = None,  # 🔥 从配置文件读取
-                 max_buffer_size: Optional[int] = None,  # 🔥 从配置文件读取
-                 buffer_warning_threshold: Optional[float] = None,  # 🔥 从配置文件读取
-                 buffer_flush_threshold: Optional[float] = None,  # 🔥 从配置文件读取
+                 flush_interval: Optional[int] = None,  # 从配置文件读取
+                 max_buffer_size: Optional[int] = None,  # 从配置文件读取
+                 buffer_warning_threshold: Optional[float] = None,  # 从配置文件读取
+                 buffer_flush_threshold: Optional[float] = None,  # 从配置文件读取
                  trading_day_manager = None):
         """
         初始化混合存储

@@ -27,15 +27,6 @@ from src.core.datacenter_service import DataCenterService
 # 全局数据中心服务实例（新架构，推荐使用）
 datacenter_service = DataCenterService()
 
-# ⚠️ 已废弃：以下全局变量仅为兼容旧启动方式保留，新代码请使用 datacenter_service
-# 这些模块在新架构中已不再使用，所有功能都通过 datacenter_service 访问
-storage = None
-contract_manager = None
-metrics_collector = None
-datacenter_starter = None
-bar_manager = None
-data_archiver = None
-
 
 app = FastAPI(
     title="Homalos Data Center API",
@@ -58,28 +49,6 @@ static_path.mkdir(exist_ok=True)
 app.mount("/static", StaticFiles(directory=str(static_path)), name="static")
 
 
-def init_dependencies(**deps):
-    """
-    ⚠️ 已废弃：初始化依赖（仅为兼容旧启动方式保留）
-    
-    新架构说明：
-    - 新架构使用 datacenter_service 统一管理所有模块
-    - 所有API接口已优化为直接使用 datacenter_service，不再依赖这些全局变量
-    
-    Args:
-        **deps: 依赖字典，包含storage, contract_manager, metrics_collector等（已废弃）
-    """
-    global storage, contract_manager, metrics_collector, datacenter_starter, bar_manager, data_archiver
-    
-    # 为兼容性保留，但实际上不再使用
-    storage = deps.get("storage")
-    contract_manager = deps.get("contract_manager")
-    metrics_collector = deps.get("metrics_collector")
-    datacenter_starter = deps.get("datacenter_starter")
-    bar_manager = deps.get("bar_manager")
-    data_archiver = deps.get("data_archiver")
-
-
 # ============================================================
 #  基础信息接口
 # ============================================================
@@ -89,7 +58,7 @@ def root():
     """API根路径 - 返回所有可用接口"""
     return {
         "name": "Homalos Data Center API",
-        "version": "0.2.0",
+        "version": "0.0.1",
         "endpoints": {
             "数据查询": {
                 "kline": "GET /kline/{symbol}?start=YYYY-MM-DD&end=YYYY-MM-DD&interval=1m",
@@ -123,10 +92,10 @@ def health_check():
         "message": "Service is running"
     }
     
-    # 如果有metrics_collector，添加健康检查详情
-    if metrics_collector:
+    # 如果数据中心正在运行且有 metrics_collector，添加健康检查详情
+    if datacenter_service.is_running() and datacenter_service.metrics_collector:
         try:
-            health_details = metrics_collector.check_health()
+            health_details = datacenter_service.metrics_collector.check_health()
             health_status["healthy"] = health_details.get("overall_healthy", True)
             health_status["details"] = health_details
         except Exception:
