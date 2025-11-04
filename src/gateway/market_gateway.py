@@ -443,14 +443,6 @@ class CtpMdApi(MdApi):
             # 构建系统内的tick行情数据结构
             tick: TickData = build_tick_data(data, contract, timestamp)
 
-            # 使用INFO级别日志，确保能看到数据流（每10条打印一次）
-            if not hasattr(self, '_tick_count'):
-                self._tick_count = 0
-            self._tick_count += 1
-            # 调试模式下，打印Tick数据，避免大量日志刷新
-            if self._tick_count % 10 == 0:
-                self.logger.debug(f"✓ 已接收 {self._tick_count} 条Tick | 最新: {tick.instrument_id} @ {tick.update_time} P={tick.last_price}")
-
             self.gateway.event_bus.publish(
                 Event.tick(
                 payload=PackPayload.success(message="推送深度市场行情成功", data=tick),
