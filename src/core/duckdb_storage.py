@@ -10,6 +10,7 @@
 @Description: DuckDB存储 - 按交易日分文件 + 按合约分表，极速查询引擎
 """
 import re
+import time
 import duckdb
 import pandas as pd  # type: ignore
 import threading
@@ -59,6 +60,38 @@ def normalize_instrument_id(instrument_id: str) -> str:
     # 确保以字母开头（SQL表名要求）
     if normalized and normalized[0].isdigit():
         normalized = f"c{normalized}"
+    
+    return normalized or 'unknown'
+
+
+def extract_instrument_id(instrument_id: str) -> str:
+    """
+    提取并规范化合约ID用于文件名
+    
+    规则：
+    - 保留原始大小写（rb2501, SA601, IF2501, ZC609）
+    - 移除特殊字符（只保留字母、数字、下划线）
+    - 确保文件名合法
+    
+    Args:
+        instrument_id: 原始合约ID
+    
+    Returns:
+        规范化的合约ID（用于文件名）
+    
+    Examples:
+        >>> extract_instrument_id('rb2501')
+        'rb2501'
+        >>> extract_instrument_id('SA601')
+        'SA601'
+        >>> extract_instrument_id('IF-2501')
+        'IF2501'
+    """
+    if not instrument_id:
+        return 'unknown'
+    
+    # 移除特殊字符（只保留字母、数字、下划线）
+    normalized = re.sub(r'[^a-zA-Z0-9_]', '', instrument_id)
     
     return normalized or 'unknown'
 
@@ -216,10 +249,17 @@ class DuckDBSingleFileWriter:
         self.submit_count = 0  # 提交计数器，用于定期触发监控
         self.monitor_interval = Config.duckdb_monitor_interval  # 从配置读取
         
-        # 🔥 线程池：限制最大并发刷新线程数，避免线程爆炸
+        # 🔥 线程池：根据数据类型分配不同的线程池大小（Tick和K线独立）
+        if data_type == 'ticks':
+            pool_size = Config.duckdb_tick_thread_pool_size  # Tick专用线程池
+            prefix = "DuckDB-Tick-Pool"
+        else:  # klines
+            pool_size = Config.duckdb_kline_thread_pool_size  # K线专用线程池
+            prefix = "DuckDB-KLine-Pool"
+        
         self.executor = ThreadPoolExecutor(
-            max_workers=2,  # ✅ 优化：2个并发刷新线程（1个处理当天，1个处理跨日情况）
-            thread_name_prefix="DuckDB-Pool"
+            max_workers=pool_size,
+            thread_name_prefix=prefix
         )
         self._future_counter = 0  # Future计数器，用于生成唯一任务ID
         self._future_lock = threading.Lock()
@@ -228,7 +268,7 @@ class DuckDBSingleFileWriter:
         
         self.logger.info(
             f"✓ DuckDB写入器已初始化 [{data_type.upper()}]：路径={db_path}，"
-            f"批量阈值={batch_threshold}，线程池大小=2"
+            f"批量阈值={batch_threshold}，线程池大小={pool_size}（{prefix}专用线程池）"
         )
     
     def submit_batch(self, df: pd.DataFrame) -> None:
@@ -292,12 +332,24 @@ class DuckDBSingleFileWriter:
                         task_id = f"{day_key}-{self._future_counter}"
                     
                     # 🔥 提交到线程池（线程池自动限制并发数）
-                    self.executor.submit(self._flush_day_async, day_key, dfs_to_flush, task_id)
+                    future = self.executor.submit(self._flush_day_async, day_key, dfs_to_flush, task_id)
                     
-                    # 获取线程池状态
+                    # 🔥 添加回调：捕获异常（防止Future静默失败）
+                    def check_future_exception(f):
+                        try:
+                            f.result()  # 如果有异常，会在这里抛出
+                        except Exception as e:
+                            self.logger.error(
+                                f"❌ DuckDB任务 {task_id} 执行失败：{e}",
+                                exc_info=True
+                            )
+                    
+                    future.add_done_callback(check_future_exception)
+                    
+                    # 获取线程池状态（修正前缀匹配）
                     pool_threads = [
                         t for t in threading.enumerate() 
-                        if t.name.startswith("DuckDB-Pool")
+                        if t.name.startswith("DuckDB-Tick-Pool") or t.name.startswith("DuckDB-KLine-Pool")
                     ]
                     
                     self.logger.info(
@@ -325,7 +377,7 @@ class DuckDBSingleFileWriter:
     
     def _calculate_dynamic_timeout(self, row_count: int) -> float:
         """
-        根据数据量动态计算超时时间
+        根据数据量动态计算超时时间（优化版）
         
         Args:
             row_count: 数据行数
@@ -336,27 +388,30 @@ class DuckDBSingleFileWriter:
         计算公式：
             timeout = base_timeout + (row_count / 1000) * timeout_per_1k_rows
             
+        优化策略：
+            - 基准超时提高到1小时（原15分钟）
+            - 每1000条增加20秒（原10秒）
+            - 最大超时2小时（原无上限）
+            
         示例：
-            - 1000 条   → 900 + 1*10 = 910 秒 （15.2分钟）
-            - 10000 条  → 900 + 10*10 = 1000 秒 （16.7分钟）
-            - 30000 条  → 900 + 30*10 = 1200 秒 （20分钟）
+            - 5000 条   → 3600 + 5*20 = 3700 秒 （61.7分钟）
+            - 30000 条  → 3600 + 30*20 = 4200 秒 （70分钟）
+            - 50000 条  → 3600 + 50*20 = 4600 秒 （76.7分钟）
         """
-        # 使用配置的 max_thread_lifetime 作为基础超时
-        base_timeout = self.max_thread_lifetime  # 900秒（15分钟）
+        # 🔥 优化：使用配置的 max_thread_lifetime 作为基础超时（3600秒=1小时）
+        base_timeout = self.max_thread_lifetime
         
-        # 每1000条数据增加10秒超时
-        timeout_per_1k_rows = 10
+        # 🔥 优化：每1000条数据增加20秒超时（原10秒）
+        timeout_per_1k_rows = 20
+        
+        # 🔥 优化：最大超时2小时（防止无限等待）
+        max_timeout = 7200.0
         
         # 计算动态超时
-        calculated_timeout = base_timeout + (row_count / 1000) * timeout_per_1k_rows
+        dynamic_timeout = base_timeout + (row_count / 1000.0) * timeout_per_1k_rows
         
-        # 增加20%安全边际
-        calculated_timeout *= 1.2
-        
-        # 限制最大超时为30分钟
-        max_allowed_timeout = 1800
-        
-        return min(calculated_timeout, max_allowed_timeout)
+        # 限制最大值
+        return min(dynamic_timeout, max_timeout)
     
     def _monitor_and_cleanup_threads(self) -> Dict:
         """
@@ -381,7 +436,10 @@ class DuckDBSingleFileWriter:
         
         # 获取所有线程池线程
         all_threads = threading.enumerate()
-        pool_threads = [t for t in all_threads if t.name.startswith("DuckDB-Pool")]
+        pool_threads = [
+            t for t in all_threads 
+            if t.name.startswith("DuckDB-Tick-Pool") or t.name.startswith("DuckDB-KLine-Pool")
+        ]
         
         zombie_tasks = []
         cleaned_count = 0
@@ -439,21 +497,18 @@ class DuckDBSingleFileWriter:
     
     def _flush_day_async(self, trading_day: str, dfs: List[pd.DataFrame], task_id: str) -> None:
         """
-        异步刷新单日数据到DuckDB文件（在线程池中执行）
+        异步刷新单日数据到DuckDB文件（按合约分文件写入）
         
         Args:
             trading_day: 交易日期（格式：YYYYMMDD）
             dfs: 待刷新的DataFrame列表
             task_id: 任务ID（用于跟踪）
         
-        关键：此方法在线程池中执行，不持buffer_lock，不阻塞新数据追加
-        
-        实现要点：
-        1. 合并该日的所有批次数据
-        2. 按InstrumentID, Timestamp排序（保证时间序列连续性）
-        3. 创建或打开对应的.duckdb文件
-        4. 按合约分组，为每个合约创建独立的表
-        5. 每个合约的数据写入对应的表（天然物理连续！）
+        关键变化：
+        1. 按合约分文件：{trading_day}/{instrument_id}.duckdb
+        2. 单表设计：每个文件只有一张表（tick 或 kline）
+        3. 每个合约独立写入，完全无锁竞争
+        4. 并行度提升：820个合约可同时写入
         """
         if not dfs:
             return
@@ -474,118 +529,195 @@ class DuckDBSingleFileWriter:
                 'thread_name': thread_name
             }
         
-        # 2. 排序（保证时间序列连续性）
-        merged_df = merged_df.sort_values(
-            by=['InstrumentID', 'Timestamp']
-        ).reset_index(drop=True)
+        # 🔥 立即打印任务开始日志
+        self.logger.info(
+            f"🚀 DuckDB[{self.data_type}]任务开始：{task_id}，"
+            f"交易日={trading_day}，数据量={row_count}条，线程={thread_name}"
+        )
         
-        # 3. 获取文件锁（防止并发写入同一个DuckDB文件）
-        file_lock = self._get_file_lock(trading_day)
-        db_file = self.db_path / f"{trading_day}.duckdb"
+        try:
+            # 排序（保证时间序列连续性）
+            merged_df = merged_df.sort_values(
+                by=['InstrumentID', 'Timestamp']
+            ).reset_index(drop=True)
+            
+            # 🔥 新架构：创建交易日目录
+            day_dir = self.db_path / trading_day
+            day_dir.mkdir(parents=True, exist_ok=True)
+            
+            self.logger.debug(f"  交易日目录已创建：{day_dir}")
+            
+            contracts_written = []
+            total_rows = 0
+            total_contracts = merged_df['InstrumentID'].nunique()
+            
+            self.logger.info(f"  开始写入 {total_contracts} 个合约...")
+            
+            # 🔥 新架构：按合约分组，每个合约写入独立文件
+            for idx, (instrument_id, group_df) in enumerate(merged_df.groupby('InstrumentID', sort=False), 1):
+                instrument_id = str(instrument_id)
+                
+                # 生成合约文件路径
+                file_id = extract_instrument_id(instrument_id)
+                db_file = day_dir / f"{file_id}.duckdb"
+                
+                # 🔥 关键：每个合约有独立的文件锁（无竞争）
+                file_lock = self._get_file_lock(f"{trading_day}_{instrument_id}")
+                
+                with file_lock:
+                    # 连接数据库（不使用config参数，所有配置通过PRAGMA设置）
+                    conn = duckdb.connect(str(db_file))
+                    
+                    try:
+                        # 设置DuckDB性能参数
+                        conn.execute("PRAGMA memory_limit='2GB'")
+                        conn.execute("PRAGMA threads=4")
+                        conn.execute("PRAGMA checkpoint_threshold='512MB'")
+                        # WAL模式会自动启用，无需显式设置
+                        
+                        # 开始事务
+                        conn.execute("BEGIN TRANSACTION")
+                        
+                        # 🔥 单表设计：固定表名（tick 或 kline）
+                        if self.data_type == 'ticks':
+                            table_name = "tick"
+                            create_sql = create_tick_table_sql(instrument_id).replace(
+                                f'"tick_{normalize_instrument_id(instrument_id)}"',
+                                '"tick"'
+                            )
+                        else:  # klines
+                            table_name = "kline"
+                            create_sql = create_kline_table_sql(instrument_id).replace(
+                                f'"kline_{normalize_instrument_id(instrument_id)}"',
+                                '"kline"'
+                            )
+                        
+                        # 创建表（如果不存在）
+                        conn.execute(create_sql)
+                        
+                        # 注册DataFrame
+                        conn.register('temp_df', group_df)
+                        
+                        # 批量插入
+                        conn.execute(f'INSERT INTO {table_name} SELECT * FROM temp_df')
+                        
+                        # 取消注册
+                        conn.unregister('temp_df')
+                        
+                        # 提交事务
+                        conn.execute("COMMIT")
+                        
+                        contracts_written.append(instrument_id)
+                        total_rows += len(group_df)
+                        
+                        # 每10个合约输出一次进度
+                        if idx % 10 == 0 or idx == total_contracts:
+                            progress = (idx / total_contracts) * 100
+                            self.logger.info(
+                                f"  进度：{idx}/{total_contracts} ({progress:.1f}%)，"
+                                f"已写入 {instrument_id} 等 {len(group_df)}条"
+                            )
+                        else:
+                            self.logger.debug(
+                                f"✓ 合约 {instrument_id} 写入完成：{len(group_df)}条 → {db_file.name}"
+                            )
+                        
+                    except Exception as e:
+                        try:
+                            conn.execute("ROLLBACK")
+                        except Exception:
+                            pass
+                        self.logger.error(
+                            f"写入合约 {instrument_id} 失败：{e}",
+                            exc_info=True
+                        )
+                    finally:
+                        conn.close()
+            
+        except Exception as e:
+            # 捕获整个写入过程的异常
+            self.logger.error(
+                f"❌ DuckDB[{self.data_type}]任务执行异常：{task_id}，"
+                f"交易日={trading_day}，错误：{e}",
+                exc_info=True
+            )
+            raise  # 重新抛出，让Future回调捕获
+            
+        finally:
+            # 无论成功还是失败，都输出完成日志
+            end_time = time.time()
+            elapsed = end_time - start_time
+            rows_per_second = row_count / elapsed if elapsed > 0 else 0
+            
+            self.logger.info(
+                f"✓ DuckDB[{self.data_type}]写入完成：{trading_day}，"
+                f"{len(contracts_written)}个合约，{total_rows}条数据，"
+                f"耗时{elapsed:.2f}秒（{rows_per_second:.0f}条/秒）"
+            )
         
-        # 使用文件锁保护整个写入过程
-        with file_lock:
-            self.logger.debug(f"获取文件锁成功：{trading_day}，开始写入...")
+        # 计算性能指标
+        dynamic_timeout = self._calculate_dynamic_timeout(row_count)
+        timeout_usage_percent = (elapsed / dynamic_timeout) * 100 if dynamic_timeout > 0 else 0
+        
+        # 记录详细的性能日志
+        self.logger.info(
+            f"📊 DuckDB写入任务完成：{task_id}，"
+            f"交易日={trading_day}，数据量={row_count}条，"
+            f"耗时={elapsed:.1f}秒，速度={rows_per_second:.0f}条/秒，"
+            f"超时阈值={dynamic_timeout:.1f}秒，使用率={timeout_usage_percent:.1f}%"
+        )
+        
+        # 如果任务耗时接近超时阈值，发出警告
+        if timeout_usage_percent > 80:
+            self.logger.warning(
+                f"⚠️ 任务 {task_id} 耗时接近超时阈值（{timeout_usage_percent:.1f}%），"
+                f"可能需要优化写入性能或调整超时配置"
+            )
+        
+        # 🔥 性能趋势监控
+        if not hasattr(self, '_perf_history'):
+            self._perf_history = []
+            self._perf_history_lock = threading.Lock()
+
+        with self._perf_history_lock:
+            # 记录最近20次写入性能
+            self._perf_history.append({
+                'timestamp': time.time(),
+                'task_id': task_id,
+                'row_count': row_count,
+                'elapsed': elapsed,
+                'speed': rows_per_second,
+            })
             
-            # 打开DuckDB连接
-            conn = duckdb.connect(str(db_file))
+            # 只保留最近20次
+            if len(self._perf_history) > 20:
+                self._perf_history = self._perf_history[-20:]
             
-            try:
-                # 4. 按合约分组写入（每个合约一张表）
-                conn.execute("BEGIN TRANSACTION")
+            # 计算平均速度和趋势
+            if len(self._perf_history) >= 5:
+                recent_speeds: list = [h['speed'] for h in self._perf_history[-5:] if isinstance(h.get('speed'), (int, float))]
+                if recent_speeds:
+                    avg_speed = float(sum(recent_speeds)) / len(recent_speeds)  # type: ignore[arg-type]
+                else:
+                    avg_speed = 0
                 
-                contracts_written = []
-                total_rows = 0
-                
-                # 按InstrumentID分组（已排序，高效）
-                for instrument_id, group_df in merged_df.groupby('InstrumentID', sort=False):
-                    instrument_id: str = str(instrument_id)
-                    # 4.1 生成表名和创建SQL
-                    if self.data_type == 'ticks':
-                        create_sql = create_tick_table_sql(instrument_id)
-                        table_name = f"tick_{normalize_instrument_id(instrument_id)}"
-                    else:  # klines
-                        create_sql = create_kline_table_sql(instrument_id)
-                        table_name = f"kline_{normalize_instrument_id(instrument_id)}"
-                    
-                    # 4.2 创建表（如果不存在）
-                    conn.execute(create_sql)
-                    
-                    # 4.3 注册DataFrame为临时表
-                    conn.register('temp_df', group_df)
-                    
-                    # 4.4 批量插入（使用双引号包裹表名，支持大小写）
-                    conn.execute(f'INSERT INTO "{table_name}" SELECT * FROM temp_df')
-                    
-                    # 4.5 取消注册
-                    conn.unregister('temp_df')
-                    
-                    contracts_written.append(instrument_id)
-                    total_rows += len(group_df)
-                
-                # 5. 提交事务
-                conn.execute("COMMIT")
-                
-                self.logger.info(
-                    f"✓ DuckDB异步写入成功：{trading_day}，{total_rows}条，"
-                    f"{len(contracts_written)}个合约 | "
-                    f"示例(前5个合约)：{contracts_written[:5]}"
-                )
-                
-            except Exception as e:
-                # 回滚事务
-                try:
-                    conn.execute("ROLLBACK")
-                except Exception as rollback_e:
-                    self.logger.exception(
-                        f"DuckDB异步写入失败（回滚失败）：{rollback_e}",
-                        exc_info=True
-                    )
-                
-                self.logger.error(
-                    f"DuckDB异步写入失败 [{trading_day}]：{e}",
-                    exc_info=True
-                )
-                raise
-            
-            finally:
-                # 6. 关闭连接
-                conn.close()
-                
-                # 记录线程结束，从跟踪中移除
-                end_time = time.time()
-                elapsed = end_time - start_time
-                
-                # 计算性能指标
-                rows_per_second = row_count / elapsed if elapsed > 0 else 0
-                dynamic_timeout = self._calculate_dynamic_timeout(row_count)
-                timeout_usage_percent = (elapsed / dynamic_timeout) * 100 if dynamic_timeout > 0 else 0
-                
-                # 记录详细的性能日志
-                self.logger.info(
-                    f"📊 DuckDB写入任务完成：{task_id}，"
-                    f"交易日={trading_day}，数据量={row_count}条，"
-                    f"耗时={elapsed:.1f}秒，速度={rows_per_second:.0f}条/秒，"
-                    f"超时阈值={dynamic_timeout:.1f}秒，使用率={timeout_usage_percent:.1f}%"
-                )
-                
-                # 如果任务耗时接近超时阈值，发出警告
-                if timeout_usage_percent > 80:
+                # 如果平均速度低于50条/秒，发出警告
+                if avg_speed > 0 and avg_speed < 50:
                     self.logger.warning(
-                        f"⚠️ 任务 {task_id} 耗时接近超时阈值（{timeout_usage_percent:.1f}%），"
-                        f"可能需要优化写入性能或调整超时配置"
+                        f"⚠️ DuckDB写入性能下降：最近5次平均速度={avg_speed:.0f}条/秒 "
+                        f"（低于50条/秒阈值），建议执行数据库维护"
                     )
-                
-                # 从跟踪表中移除任务
-                with self.thread_track_lock:
-                    if task_id in self.active_threads:
-                        del self.active_threads[task_id]
-                        self.logger.debug(f"✓ 任务 {task_id} 已从跟踪表中移除")
-                
-                self.logger.debug(
-                    f"线程池任务{task_id}完成（{thread_name}），耗时{elapsed:.2f}秒，"
-                    f"数据量={row_count}条"
-                )
+        
+        # 从跟踪表中移除任务
+        with self.thread_track_lock:
+            if task_id in self.active_threads:
+                del self.active_threads[task_id]
+                self.logger.debug(f"✓ 任务 {task_id} 已从跟踪表中移除")
+        
+        self.logger.debug(
+            f"线程池任务{task_id}完成（{thread_name}），耗时{elapsed:.2f}秒，"
+            f"数据量={row_count}条"
+        )
     
     def stop(self, timeout: float = 30.0) -> None:
         """
@@ -613,6 +745,14 @@ class DuckDBSingleFileWriter:
         self.logger.info(f"关闭线程池，等待所有任务完成（超时={timeout}秒）...")
         self.executor.shutdown(wait=True, cancel_futures=False)  # wait=True 会等待所有任务完成
         
+        # 🔥 新增：数据库维护（仅在停止时执行）
+        self.logger.info("开始数据库维护...")
+        for day in days_to_flush:
+            try:
+                self.maintain_database(day)
+            except Exception as e:
+                self.logger.error(f"维护数据库 {day} 失败：{e}")
+        
         # 3. 检查是否还有未完成的任务
         with self.thread_track_lock:
             if self.active_threads:
@@ -638,6 +778,78 @@ class DuckDBSingleFileWriter:
         # 生成同步任务ID
         task_id = f"{trading_day}-sync"
         self._flush_day_async(trading_day, dfs, task_id)
+    
+    def maintain_database(self, trading_day: str, instrument_id: Optional[str] = None) -> None:
+        """
+        数据库维护：CHECKPOINT + VACUUM + ANALYZE
+        
+        建议：在非交易时段调用（如停止时或凌晨2点）
+        
+        Args:
+            trading_day: 交易日期（YYYYMMDD格式）
+            instrument_id: 合约ID（可选，如果不提供则维护该日所有合约文件）
+        """
+        # 🔥 新架构：维护交易日目录下的合约文件
+        day_dir = self.db_path / trading_day
+        if not day_dir.exists():
+            self.logger.warning(f"交易日目录不存在，跳过维护：{day_dir}")
+            return
+        
+        # 如果指定合约，只维护该合约文件
+        if instrument_id:
+            file_id = extract_instrument_id(instrument_id)
+            db_files = [day_dir / f"{file_id}.duckdb"]
+        else:
+            # 维护该日所有合约文件
+            db_files = list(day_dir.glob("*.duckdb"))
+        
+        if not db_files:
+            self.logger.warning(f"未找到数据库文件：{day_dir}")
+            return
+        
+        self.logger.info(f"开始维护数据库：{trading_day}，共{len(db_files)}个文件")
+        total_start = time.time()
+        
+        success_count = 0
+        failed_count = 0
+        
+        for db_file in db_files:
+            if not db_file.exists():
+                continue
+            
+            try:
+                start_time = time.time()
+                
+                # 连接数据库并设置性能参数
+                conn = duckdb.connect(str(db_file))
+                conn.execute("PRAGMA memory_limit='2GB'")
+                conn.execute("PRAGMA threads=4")
+                
+                # CHECKPOINT
+                conn.execute("CHECKPOINT")
+                
+                # VACUUM
+                conn.execute("VACUUM")
+                
+                # ANALYZE
+                conn.execute("ANALYZE")
+                
+                conn.close()
+                
+                elapsed = time.time() - start_time
+                self.logger.debug(f"  ✓ 维护完成：{db_file.name}，耗时{elapsed:.1f}秒")
+                success_count += 1
+                
+            except Exception as e:
+                self.logger.error(f"  维护失败：{db_file.name}，错误：{e}")
+                failed_count += 1
+        
+        total_elapsed = time.time() - total_start
+        self.logger.info(
+            f"✓ 数据库维护完成：{trading_day}，"
+            f"成功{success_count}个，失败{failed_count}个，"
+            f"总耗时{total_elapsed:.1f}秒"
+        )
     
     def get_stats(self) -> Dict:
         """
@@ -751,32 +963,30 @@ class DuckDBQueryEngine:
         单日查询（最快路径）
         
         实现：
-        1. 打开对应的.duckdb文件（只读模式）
-        2. 执行查询：WHERE InstrumentID = ? AND Timestamp BETWEEN ? AND ?
-        3. Zone Maps自动裁剪（跳过不相关的Row Groups）
+        1. 定位合约文件：{trading_day}/{instrument_id}.duckdb
+        2. 打开文件（只读模式）
+        3. 查询固定表名（tick 或 kline）
         4. 返回结果
         """
-        db_file = self.db_path / f"{trading_day}.duckdb"
+        # 🔥 新架构：定位合约文件
+        file_id = extract_instrument_id(instrument_id)
+        db_file = self.db_path / trading_day / f"{file_id}.duckdb"
         
         if not db_file.exists():
-            self.logger.warning(f"数据库文件不存在：{db_file}")
+            self.logger.debug(f"合约文件不存在：{db_file}（合约当天无数据）")
             return pd.DataFrame()
         
         # 打开连接（只读模式）
         conn = duckdb.connect(str(db_file), read_only=True)
-        table_name: str = ""
+        
         try:
-            # 接查询合约表（天然物理隔离，极速查询）
-            if self.data_type == 'ticks':
-                table_name = f"tick_{normalize_instrument_id(instrument_id)}"
-            else:  # klines
-                table_name = f"kline_{normalize_instrument_id(instrument_id)}"
+            # 🔥 固定表名
+            table_name = "tick" if self.data_type == 'ticks' else "kline"
             
-            # 查询（只需时间过滤，无需InstrumentID过滤）
-            # 使用双引号包裹表名，支持大小写敏感（ZC609 ≠ zc609）
+            # 查询（只需时间过滤）
             # language=SQL
             query = f"""
-                SELECT * FROM "{table_name}"
+                SELECT * FROM {table_name}
                 WHERE Timestamp BETWEEN ? AND ?
                 ORDER BY Timestamp
             """
@@ -784,7 +994,7 @@ class DuckDBQueryEngine:
             df = conn.execute(query, [start_dt, end_dt]).df()
             
             self.logger.debug(
-                f"单日查询完成：{trading_day}/{instrument_id}（表: {table_name}），{len(df)}条"
+                f"单日查询完成：{trading_day}/{instrument_id}（文件: {db_file.name}），{len(df)}条"
             )
             
             return df
@@ -795,7 +1005,7 @@ class DuckDBQueryEngine:
                 self.logger.debug(f"合约表不存在：{table_name}（合约当天无数据）")
                 return pd.DataFrame()
             else:
-                self.logger.error(f"单日查询失败 [{trading_day}]：{e}", exc_info=True)
+                self.logger.error(f"单日查询失败 [{trading_day}/{instrument_id}]：{e}", exc_info=True)
                 return pd.DataFrame()
         
         finally:
@@ -811,20 +1021,21 @@ class DuckDBQueryEngine:
         
         实现：
         1. 创建内存连接：duckdb.connect(':memory:')
-        2. ATTACH所有相关日期的.duckdb文件
+        2. ATTACH所有相关日期的合约文件：{day}/{instrument_id}.duckdb
         3. UNION ALL查询
         4. DuckDB自动并行扫描
         5. 按Timestamp排序返回
         """
-        # 构建文件列表（过滤不存在的文件）
+        # 🔥 新架构：构建合约文件列表（每个交易日的合约文件）
+        file_id = extract_instrument_id(instrument_id)
         db_files = [
-            (str(self.db_path / f"{day}.duckdb"), day)
+            (str(self.db_path / day / f"{file_id}.duckdb"), day)
             for day in trading_days
-            if (self.db_path / f"{day}.duckdb").exists()
+            if (self.db_path / day / f"{file_id}.duckdb").exists()
         ]
         
         if not db_files:
-            self.logger.warning(f"未找到任何数据库文件：{trading_days}")
+            self.logger.warning(f"未找到任何合约文件：{instrument_id} in {trading_days}")
             return pd.DataFrame()
         
         # 创建内存连接
@@ -834,18 +1045,16 @@ class DuckDBQueryEngine:
             # ATTACH所有相关日期的数据库
             for i, (db_file, day) in enumerate(db_files):
                 conn.execute(f"ATTACH '{db_file}' AS db{i} (READ_ONLY)")
-                self.logger.debug(f"ATTACH数据库：db{i} <- {day}")
+                self.logger.debug(f"ATTACH数据库：db{i} <- {day}/{file_id}.duckdb")
             
-            # 构建UNION ALL查询（查询各文件的合约表）
-            if self.data_type == 'ticks':
-                table_name = f"tick_{normalize_instrument_id(instrument_id)}"
-            else:  # klines
-                table_name = f"kline_{normalize_instrument_id(instrument_id)}"
+            # 🔥 固定表名
+            table_name = "tick" if self.data_type == 'ticks' else "kline"
             
+            # 构建UNION ALL查询
             # language=SQL
             union_queries = [
                 f"""
-                SELECT * FROM db{i}."{table_name}"
+                SELECT * FROM db{i}.{table_name}
                 WHERE Timestamp BETWEEN '{start_dt}' AND '{end_dt}'
                 """
                 for i in range(len(db_files))
@@ -865,7 +1074,7 @@ class DuckDBQueryEngine:
             
         except Exception as e:
             self.logger.error(
-                f"跨日查询失败 [{trading_days}]：{e}",
+                f"跨日查询失败 [{instrument_id} in {trading_days}]：{e}",
                 exc_info=True
             )
             return pd.DataFrame()
@@ -902,11 +1111,11 @@ class DuckDBQueryEngine:
         current_dt = start_dt
         
         while current_dt <= end_dt:
-            # 只检查文件是否存在（简化版）
+            # 🔥 新架构：检查交易日目录是否存在
             day_str = current_dt.strftime('%Y%m%d')
-            db_file = self.db_path / f"{day_str}.duckdb"
+            day_dir = self.db_path / day_str
             
-            if db_file.exists():
+            if day_dir.exists() and day_dir.is_dir():
                 trading_days.append(day_str)
             
             current_dt += timedelta(days=1)

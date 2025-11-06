@@ -179,20 +179,37 @@ class HybridStorage:
             try:
                 current_time = time.time()
                 
-                # 新增：定期健康检查（每5分钟）
+                # 新增：定期健康检查（每5分钟）- 优化：只在必要时输出INFO级别
                 if current_time - last_health_check >= 300.0:
                     try:
                         health = self.get_health_metrics()
-                        self.logger.info(
+                        
+                        # 判断是否需要输出INFO级别日志（出现异常情况时）
+                        tick_buffer_usage = health['buffer']['tick_buffer_usage_pct']
+                        total_threads = health['threads']['total_active']
+                        duckdb_tick_buffer = health['duckdb']['tick_buffered']
+                        duckdb_kline_buffer = health['duckdb']['kline_buffered']
+                        
+                        log_message = (
                             f"系统健康检查：{health['health_status']} | "
-                            f"线程: {health['threads']['total_active']} "
+                            f"线程: {total_threads} "
                             f"(工作线程: {health['threads']['worker_count']}) | "
-                            f"DuckDB缓冲: Tick={health['duckdb']['tick_buffered']} "
-                            f"KLine={health['duckdb']['kline_buffered']} | "
+                            f"DuckDB缓冲: Tick={duckdb_tick_buffer} "
+                            f"KLine={duckdb_kline_buffer} | "
                             f"CSV队列: Tick={health['csv']['tick_queued']} "
                             f"KLine={health['csv']['kline_queued']} | "
-                            f"Tick缓冲: {health['buffer']['tick_buffer_usage_pct']}%"
+                            f"Tick缓冲: {tick_buffer_usage}%"
                         )
+                        
+                        # 🔥 优化：只在异常情况下输出INFO，正常情况降级为DEBUG
+                        if (tick_buffer_usage > 50.0 or 
+                            total_threads > 80 or 
+                            duckdb_tick_buffer > 50000 or
+                            duckdb_kline_buffer > 5000):
+                            self.logger.info(log_message)
+                        else:
+                            self.logger.debug(log_message)
+                        
                         last_health_check = current_time
                     except Exception as e:
                         self.logger.error(f"健康检查失败：{e}")
@@ -334,9 +351,9 @@ class HybridStorage:
                     self._flush_tick_buffer_locked()
                     return
                 
-                # 警告（70%）：缓冲区使用率偏高（仅记录日志，每1000条打印一次）
+                # 警告（70%）：缓冲区使用率偏高（仅记录日志，每5000条打印一次）
                 if buffer_size >= self._warning_size:
-                    if self._tick_recv_count % 1000 == 0:
+                    if self._tick_recv_count % 5000 == 0:
                         buffer_usage = buffer_size / self.max_buffer_size * 100
                         self.logger.warning(
                             f"⚠️ 缓冲区使用率偏高 ({buffer_size}/{self.max_buffer_size} 条, {buffer_usage:.1f}%)，"
@@ -344,8 +361,8 @@ class HybridStorage:
                         )
                     return
             
-            # ===== 正常日志（在临界区外，避免持锁时间过长）=====
-            if self._tick_recv_count % 1000 == 0:
+            # ===== 正常日志（在临界区外，避免持锁时间过长）- 优化为每10000条输出 =====
+            if self._tick_recv_count % 10000 == 0:
                 # 快速获取缓冲区大小
                 with self._buffer_lock:
                     buffer_size = len(self.tick_buffer)

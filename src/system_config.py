@@ -105,8 +105,11 @@ class Config(object):
     # Level 2: DuckDB存储配置
     duckdb_tick_batch_threshold: int = extra_config.get("datacenter_storage.duckdb.tick_batch_threshold", 30000)
     duckdb_kline_batch_threshold: int = extra_config.get("datacenter_storage.duckdb.kline_batch_threshold", 3000)
+    duckdb_tick_thread_pool_size: int = extra_config.get("datacenter_storage.duckdb.tick_thread_pool_size", 3)
+    duckdb_kline_thread_pool_size: int = extra_config.get("datacenter_storage.duckdb.kline_thread_pool_size", 2)
     duckdb_max_thread_lifetime: int = extra_config.get("datacenter_storage.duckdb.max_thread_lifetime", 300)
     duckdb_monitor_interval: int = extra_config.get("datacenter_storage.duckdb.monitor_interval", 10)
+    duckdb_temp_directory: str = extra_config.get("datacenter_storage.duckdb.temp_directory", "data/temp/duckdb")
     
     # Level 2: CSV归档配置
     csv_tick_batch_threshold: int = extra_config.get("datacenter_storage.csv.tick_batch_threshold", 30000)
